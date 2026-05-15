@@ -14,7 +14,7 @@
 #    under the License.
 
 custom_config_data = {
-    "proxy": "http://192.168.167.3:8000",
+    "proxy": "http://127.0.0.1:18000/v1",
     "portal_port": "5000",
     "search_port": "7788",
     "environment": "dev-mode",

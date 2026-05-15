@@ -207,6 +207,12 @@ def get_turbo_mode() -> bool:
     return turbo_mode in ("1", "true", "yes", "enabled", "on")
 
 
+def get_contest_mode() -> bool:
+    """Return whether contest-oriented orchestration is enabled."""
+    contest_mode = os.environ.get("CONTEST_MODE", "").strip().lower()
+    return contest_mode in ("1", "true", "yes", "enabled", "on")
+
+
 def validate_config(config: dict) -> bool:
     """验证必要配置是否存在"""
     if not config.get("api_key"):

@@ -20,6 +20,7 @@ import platform
 from pathlib import PureWindowsPath, PurePosixPath
 
 from app.common.logger_util import logger
+from app.cosight.agent.contest_mode import is_contest_mode, safe_json_dump
 
 
 # 在文件开头添加全局字典
@@ -50,9 +51,69 @@ class Plan:
 
     def set_plan_result(self, plan_result):
         self.result = plan_result
+        self.export_competition_trace()
 
     def get_plan_result(self):
         return self.result
+
+    @staticmethod
+    def _short_text(value, limit: int = 4000) -> str:
+        text = "" if value is None else str(value)
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+    def to_competition_trace(self) -> Dict:
+        """Return a compact machine-readable trace for contest submission."""
+        steps_payload = []
+        for index, step in enumerate(self.steps):
+            tool_calls = []
+            for call in self.step_tool_calls.get(step, []):
+                tool_calls.append({
+                    "tool_name": call.get("tool_name"),
+                    "tool_args": self._short_text(call.get("tool_args"), 2000),
+                    "tool_result": self._short_text(call.get("tool_result"), 4000),
+                    "timestamp": call.get("timestamp"),
+                })
+            steps_payload.append({
+                "index": index,
+                "title": step,
+                "status": self.step_statuses.get(step, "not_started"),
+                "dependencies": self.dependencies.get(index, []),
+                "notes": self._short_text(self.step_notes.get(step), 4000),
+                "details": self._short_text(self.step_details.get(step), 4000),
+                "files": self.step_files.get(step, []),
+                "tool_calls": tool_calls,
+            })
+
+        global_tools = []
+        for call in self.step_tool_calls.get("__global_tools__", []):
+            global_tools.append({
+                "tool_name": call.get("tool_name"),
+                "tool_args": self._short_text(call.get("tool_args"), 2000),
+                "tool_result": self._short_text(call.get("tool_result"), 4000),
+                "timestamp": call.get("timestamp"),
+            })
+
+        return {
+            "contest_trace_version": 1,
+            "title": self.title,
+            "workspace_path": self.work_space_path,
+            "progress": self.get_progress(),
+            "steps": steps_payload,
+            "global_tool_calls": global_tools,
+            "final_answer": self._short_text(self.result, 8000),
+        }
+
+    def export_competition_trace(self) -> None:
+        """Write competition_trace.json when CONTEST_MODE is enabled."""
+        if not is_contest_mode():
+            return
+        try:
+            workspace = self.work_space_path if self.work_space_path else os.environ.get("WORKSPACE_PATH") or os.getcwd()
+            safe_json_dump(os.path.join(workspace, "competition_trace.json"), self.to_competition_trace())
+        except Exception as e:
+            logger.warning(f"Failed to export competition trace: {e}")
 
     def get_ready_steps(self) -> List[int]:
         """获取所有前置依赖都已完成的步骤索引
@@ -127,6 +188,7 @@ class Plan:
         else:
             self.dependencies = {i: [i - 1] for i in range(1, len(steps))} if len(steps) > 1 else {}
         logger.info(f"after update dependencies: {self.dependencies}")
+        self.export_competition_trace()
 
     def mark_step(self, step_index: int, step_status: Optional[str] = None, step_notes: Optional[str] = None) -> None:
         """Mark a single step with specific statuses, notes, and details.
@@ -158,6 +220,7 @@ class Plan:
             if not all(self.step_statuses[self.steps[int(dep)]] == "completed" for dep in
                        self.dependencies.get(step_index, [])):
                 raise ValueError(f"Cannot complete step {step_index} before its dependencies are completed")
+        self.export_competition_trace()
 
     def add_tool_call(self, step_index: int, tool_name: str, tool_args: str, tool_result: str = None) -> None:
         """Add tool call information to a specific step.
@@ -183,6 +246,7 @@ class Plan:
             }
             self.step_tool_calls[global_key].append(tool_call_info)
             logger.info(f"Added global tool call: {tool_name}")
+            self.export_competition_trace()
             return
         
         # Handle step-specific tools
@@ -201,6 +265,7 @@ class Plan:
             self.step_tool_calls[step] = []
         self.step_tool_calls[step].append(tool_call_info)
         logger.info(f"Added tool call for step {step_index}: {tool_name}")
+        self.export_competition_trace()
 
     def _get_current_timestamp(self) -> str:
         """Get current timestamp string."""

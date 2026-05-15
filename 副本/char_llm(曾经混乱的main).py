@@ -23,6 +23,7 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletion
 
 from app.agent_dispatcher.infrastructure.entity.exception.ZaeFrameworkException import ZaeFrameworkException
+from app.cosight.agent.contest_mode import safe_json_dump
 from app.cosight.task.time_record_util import time_record
 from app.common.logger_util import logger
 
@@ -34,6 +35,7 @@ propagate_attributes = None
 if langfuse_enabled:
     try:
         from langfuse import Langfuse, propagate_attributes
+
         # 初始化 Langfuse 客户端
         langfuse_client = Langfuse()
         logger.info("✅ Langfuse client initialized for custom tracing")
@@ -60,7 +62,7 @@ class ChatLLM:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.thinking_mode = thinking_mode
-        
+
         # Langfuse追踪配置
         self.current_trace_id = None  # 当前任务的trace_id
         self.current_session_id = None  # 当前任务的session_id
@@ -72,14 +74,50 @@ class ChatLLM:
         self.max_messages = int(os.environ.get("MAX_MESSAGES", "20"))
         # 工具返回内容的最大长度（字符数），默认50000字符
         self.max_tool_content_length = int(os.environ.get("MAX_TOOL_CONTENT_LENGTH", "50000"))
-        
+
         # 上下文压缩配置
         self.compression_enabled = os.environ.get("ENABLE_CONTEXT_COMPRESSION", "false").lower() in ("true", "1", "yes")
         self.max_context_tokens = int(os.environ.get("MAX_CONTEXT_TOKENS", "128000"))  # 128k
         self.compression_threshold = float(os.environ.get("COMPRESSION_THRESHOLD", "0.8"))  # 80%
         self.keep_recent_turns = int(os.environ.get("KEEP_RECENT_TURNS", "3"))  # 保留最近3轮
         self.keep_initial_turns = int(os.environ.get("KEEP_INITIAL_TURNS", "2"))  # 保留最初2轮
-        logger.info(f"Context compression: enabled={self.compression_enabled}, max_tokens={self.max_context_tokens}, threshold={self.compression_threshold}, keep_initial={self.keep_initial_turns}, keep_recent={self.keep_recent_turns}")
+        logger.info(
+            f"Context compression: enabled={self.compression_enabled}, max_tokens={self.max_context_tokens}, threshold={self.compression_threshold}, keep_initial={self.keep_initial_turns}, keep_recent={self.keep_recent_turns}")
+
+    def _workspace_path(self) -> str:
+        return os.environ.get("WORKSPACE_PATH") or os.getcwd()
+
+    def _token_guard_file(self) -> str:
+        return os.path.join(self._workspace_path(), "token_guard.json")
+
+    def _load_token_guard_history(self) -> List[Dict[str, Any]]:
+        path = self._token_guard_file()
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"Failed to load token guard history: {e}")
+            return []
+
+    def _record_token_guard_event(self, event: Dict[str, Any]) -> None:
+        try:
+            payload = dict(event)
+            payload["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            history = self._load_token_guard_history()
+            history.append(payload)
+            history = history[-50:]
+            safe_json_dump(self._token_guard_file(), history)
+            self.current_metadata["last_token_guard"] = payload
+        except Exception as e:
+            logger.warning(f"Failed to persist token guard event: {e}")
+
+    def _ensure_reasoning_content(self, messages: List[Dict[str, Any]]) -> None:
+        for msg in messages:
+            if msg.get("role") == "assistant" and "reasoning_content" not in msg:
+                msg["reasoning_content"] = ""
 
     @staticmethod
     def clean_none_values(data):
@@ -98,7 +136,7 @@ class ChatLLM:
 
     def _count_tokens(self, messages: List[Dict[str, Any]]) -> int:
         """计算消息列表的token数量
-        
+
         使用简化的估算方法：英文约4字符=1token，中文约1.5字符=1token
         """
         try:
@@ -107,12 +145,12 @@ class ChatLLM:
                 encoding = tiktoken.encoding_for_model(self.model)
             except KeyError:
                 encoding = tiktoken.get_encoding("cl100k_base")
-            
+
             total_tokens = 0
             for message in messages:
                 # 每条消息的固定开销
                 total_tokens += 4
-                
+
                 for key, value in message.items():
                     if isinstance(value, str):
                         total_tokens += len(encoding.encode(value))
@@ -121,11 +159,11 @@ class ChatLLM:
                             if hasattr(tool_call, 'function'):
                                 total_tokens += len(encoding.encode(str(tool_call.function.name)))
                                 total_tokens += len(encoding.encode(str(tool_call.function.arguments)))
-            
+
             # 对话固定开销
             total_tokens += 2
             return total_tokens
-            
+
         except ImportError:
             # 如果tiktoken不可用，使用简化估算
             logger.debug("tiktoken not available, using simplified token estimation")
@@ -140,33 +178,121 @@ class ChatLLM:
             chinese_chars = sum(1 for c in content if '\u4e00' <= c <= '\u9fff')
             # 统计其他字符
             other_chars = len(content) - chinese_chars
-            
+
             # 中文约1.5字符=1token，英文约4字符=1token
             total_chars += chinese_chars / 1.5 + other_chars / 4
-        
+
         return int(total_chars) + len(messages) * 4  # 加上消息开销
+
+    @staticmethod
+    def _tool_content_preview(content: str, limit: int) -> str:
+        if len(content) <= limit:
+            return content
+        head = content[: int(limit * 0.7)]
+        tail = content[-int(limit * 0.2):] if limit >= 10 else ""
+        return f"{head}\n...[truncated]...\n{tail}"
+
+    def _truncate_tool_messages(self, messages: List[Dict[str, Any]]) -> tuple[
+        List[Dict[str, Any]], List[Dict[str, Any]]]:
+        updated = []
+        actions = []
+        for index, msg in enumerate(messages):
+            msg_copy = msg.copy()
+            if msg_copy.get("role") == "tool" and isinstance(msg_copy.get("content"), str):
+                content = msg_copy["content"]
+                if len(content) > self.max_tool_content_length:
+                    msg_copy["content"] = (
+                            self._tool_content_preview(content, self.max_tool_content_length)
+                            + f"\n\n[truncated from {len(content)} chars to <= {self.max_tool_content_length}]"
+                    )
+                    actions.append({
+                        "type": "truncate_tool_result",
+                        "message_index": index,
+                        "tool_name": msg_copy.get("name", "unknown"),
+                        "before_chars": len(content),
+                        "after_chars": len(msg_copy["content"]),
+                    })
+            updated.append(msg_copy)
+        return updated, actions
+
+    def _apply_token_guard(self, messages: List[Dict[str, Any]], phase: str, force: bool = False) -> tuple[
+        List[Dict[str, Any]], Dict[str, Any]]:
+        initial_tokens = self._count_tokens(messages)
+        threshold_tokens = int(self.max_context_tokens * self.compression_threshold)
+        report = {
+            "phase": phase,
+            "estimated_tokens_before": initial_tokens,
+            "threshold_tokens": threshold_tokens,
+            "max_context_tokens": self.max_context_tokens,
+            "threshold_ratio": self.compression_threshold,
+            "guard_triggered": False,
+            "actions": [],
+            "retry_count": 0,
+            "final_estimated_tokens": initial_tokens,
+        }
+        if not force and initial_tokens < threshold_tokens:
+            return messages, report
+
+        guarded_messages = messages
+        report["guard_triggered"] = True
+        guarded_messages, tool_actions = self._truncate_tool_messages(guarded_messages)
+        report["actions"].extend(tool_actions)
+        current_tokens = self._count_tokens(guarded_messages)
+
+        if current_tokens >= threshold_tokens and self.compression_enabled:
+            before_tokens = current_tokens
+            compressed = self._compress_context(guarded_messages)
+            after_tokens = self._count_tokens(compressed)
+            if after_tokens < before_tokens:
+                guarded_messages = compressed
+                report["actions"].append({
+                    "type": "compress_history",
+                    "before_tokens": before_tokens,
+                    "after_tokens": after_tokens,
+                })
+                current_tokens = after_tokens
+
+        if current_tokens >= threshold_tokens:
+            before_tokens = current_tokens
+            before_count = len(guarded_messages)
+            truncated = self._truncate_messages(guarded_messages)
+            after_tokens = self._count_tokens(truncated)
+            guarded_messages = truncated
+            report["actions"].append({
+                "type": "truncate_messages",
+                "before_message_count": before_count,
+                "after_message_count": len(truncated),
+                "before_tokens": before_tokens,
+                "after_tokens": after_tokens,
+            })
+            current_tokens = after_tokens
+
+        report["final_estimated_tokens"] = current_tokens
+        return guarded_messages, report
 
     def _should_compress_context(self, messages: List[Dict[str, Any]]) -> tuple:
         """判断是否需要压缩上下文
-        
+
         Returns:
             (需要压缩, 当前token数)
         """
         if not self.compression_enabled:
             return False, 0
-        
+
         current_tokens = self._count_tokens(messages)
         threshold_tokens = int(self.max_context_tokens * self.compression_threshold)
-        
+
         if current_tokens >= self.max_context_tokens:
             logger.warning(f"Context exceeds max tokens ({current_tokens} >= {self.max_context_tokens})")
             return True, current_tokens
         elif current_tokens >= threshold_tokens:
-            logger.info(f"Context reached compression threshold ({current_tokens} >= {threshold_tokens}, {self.compression_threshold*100}%)")
+            logger.info(
+                f"Context reached compression threshold ({current_tokens} >= {threshold_tokens}, {self.compression_threshold * 100}%)")
             return True, current_tokens
         else:
-            logger.debug(f"Current tokens: {current_tokens} / {threshold_tokens} ({current_tokens/threshold_tokens*100:.1f}%)")
-        
+            logger.debug(
+                f"Current tokens: {current_tokens} / {threshold_tokens} ({current_tokens / threshold_tokens * 100:.1f}%)")
+
         return False, current_tokens
 
     def _format_messages_for_compression(self, messages: List[Dict[str, Any]]) -> str:
@@ -175,7 +301,7 @@ class ChatLLM:
         for msg in messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
-            
+
             if role == "user":
                 lines.append(f"用户: {content}")
             elif role == "assistant":
@@ -191,18 +317,18 @@ class ChatLLM:
                 if len(content) > 1000:
                     content = content[:1000] + "..."
                 lines.append(f"工具结果[{tool_name}]: {content}")
-        
+
         return "\n".join(lines)
 
     def _compress_message_group(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """压缩一组消息"""
         if not messages:
             return []
-        
+
         try:
             conversation_text = self._format_messages_for_compression(messages)
             is_chinese = any('\u4e00' <= c <= '\u9fff' for c in conversation_text[:100])
-            
+
             if is_chinese:
                 compress_prompt = f"""你是一个信息压缩专家。请将以下对话历史压缩为简洁的摘要，保留所有关键信息。
 
@@ -232,39 +358,40 @@ class ChatLLM:
 {conversation_text}
 
 Keep facts, data, file paths. Remove redundancy. Output summary only:"""
-            
+
             # 4. 调用LLM进行压缩（添加长度限制和错误处理）
             logger.info(f"Compressing {len(messages)} messages (input: {len(conversation_text)} chars)...")
-            
+
             try:
                 # 使用较短的max_tokens避免响应过长和超时
                 compressed_text = self.chat_to_llm(
                     [{"role": "user", "content": compress_prompt}],
                     max_tokens=2000  # 限制响应长度
                 )
-                
+
                 # 5. 验证压缩结果
                 if not compressed_text or len(compressed_text.strip()) < 10:
                     logger.warning("Compression result too short, using fallback")
                     raise ValueError("Compression result invalid")
-                
+
                 # 6. 创建压缩后的消息
                 compressed_message = {
                     "role": "assistant",
                     "content": f"[压缩摘要] {compressed_text}" if is_chinese else f"[Compressed Summary] {compressed_text}"
                 }
-                
+
                 # 如果使用thinking mode，添加reasoning_content字段
                 if self.thinking_mode or "reasoner" in self.model.lower():
                     compressed_message["reasoning_content"] = ""
-                
-                logger.info(f"Successfully compressed {len(messages)} messages into 1 summary ({len(compressed_text)} chars)")
+
+                logger.info(
+                    f"Successfully compressed {len(messages)} messages into 1 summary ({len(compressed_text)} chars)")
                 return [compressed_message]
-                
+
             except Exception as compress_error:
                 logger.error(f"LLM compression call failed: {type(compress_error).__name__}: {str(compress_error)}")
                 raise  # 抛出让外层处理
-            
+
         except Exception as e:
             logger.error(f"Compression failed: {e}, falling back to keep recent messages")
             return messages[-5:] if len(messages) > 5 else messages
@@ -273,16 +400,16 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
         """紧急截断到目标比例，保持消息组完整性"""
         target_tokens = int(self.max_context_tokens * target_ratio)
         current_tokens = self._count_tokens(messages)
-        
+
         if current_tokens <= target_tokens:
             return messages
-        
+
         system_messages = [msg for msg in messages if msg.get("role") == "system"]
         non_system_messages = [msg for msg in messages if msg.get("role") != "system"]
-        
+
         # 构建消息组（assistant + tool_calls + tool responses）
         message_groups = self._build_message_groups(non_system_messages)
-        
+
         # 从后往前保留完整的消息组
         result = system_messages.copy()
         for group in reversed(message_groups):
@@ -292,18 +419,18 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 result = system_messages + group + result[len(system_messages):]
             else:
                 break
-        
+
         logger.warning(f"Emergency truncated: {len(messages)} -> {len(result)} messages")
         return result
-    
+
     def _build_message_groups(self, messages: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         """将消息构建为组，确保assistant+tool_calls和对应的tool消息配对"""
         groups = []
         current_group = []
-        
+
         for msg in messages:
             role = msg.get("role")
-            
+
             if role == "assistant":
                 # 保存当前组
                 if current_group:
@@ -324,82 +451,84 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 if current_group:
                     groups.append(current_group)
                 current_group = [msg]
-        
+
         # 添加最后一组
         if current_group:
             groups.append(current_group)
-        
+
         return groups
 
     def _compress_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """压缩上下文消息，保持消息组完整性"""
         current_tokens = self._count_tokens(messages)
-        
+
         # 如果超过最大长度，先紧急截断
         if current_tokens > self.max_context_tokens:
             logger.warning(f"Emergency truncation triggered: {current_tokens} > {self.max_context_tokens}")
             messages = self._emergency_truncate(messages, target_ratio=0.9)
             current_tokens = self._count_tokens(messages)
-        
+
         # 分离消息
         system_messages = [msg for msg in messages if msg.get("role") == "system"]
         non_system_messages = [msg for msg in messages if msg.get("role") != "system"]
-        
+
         # 构建消息组
         message_groups = self._build_message_groups(non_system_messages)
-        
+
         # 计算需要保留的消息组数量
         min_required_groups = self.keep_initial_turns + self.keep_recent_turns
-        
+
         if len(message_groups) <= min_required_groups:
-            logger.info(f"Too few message groups to compress (need > {min_required_groups}, have {len(message_groups)})")
+            logger.info(
+                f"Too few message groups to compress (need > {min_required_groups}, have {len(message_groups)})")
             return messages
-        
+
         # 分离最初、中间、最近的消息组
         initial_groups = message_groups[:self.keep_initial_turns]
         recent_groups = message_groups[-self.keep_recent_turns:]
         middle_groups = message_groups[self.keep_initial_turns:-self.keep_recent_turns]
-        
+
         # 展平消息组
         initial_messages = [msg for group in initial_groups for msg in group]
         recent_messages = [msg for group in recent_groups for msg in group]
         middle_messages = [msg for group in middle_groups for msg in group]
-        
-        logger.info(f"Keeping {len(initial_messages)} initial messages ({len(initial_groups)} groups), compressing {len(middle_messages)} middle messages ({len(middle_groups)} groups), keeping {len(recent_messages)} recent messages ({len(recent_groups)} groups)")
-        
+
+        logger.info(
+            f"Keeping {len(initial_messages)} initial messages ({len(initial_groups)} groups), compressing {len(middle_messages)} middle messages ({len(middle_groups)} groups), keeping {len(recent_messages)} recent messages ({len(recent_groups)} groups)")
+
         # 压缩中间消息
         compressed_middle = self._compress_message_group(middle_messages)
-        
+
         # 合并结果：系统消息 + 最初消息 + 压缩的中间消息 + 最近消息
         result = system_messages + initial_messages + compressed_middle + recent_messages
-        
+
         # 验证压缩效果
         new_tokens = self._count_tokens(result)
         compression_ratio = new_tokens / current_tokens if current_tokens > 0 else 1
         logger.info(f"Compression complete: {current_tokens} -> {new_tokens} tokens ({compression_ratio:.1%})")
-        
+
         return result
 
     def _truncate_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         截断消息历史，防止上下文长度超限
-        
+
         策略：
         1. 保留系统消息（role="system"）
         2. 按消息组截断，确保 assistant 消息和对应的 tool 消息配对
         3. 保留最近的 N 条消息（由 max_messages 配置）
         4. 截断工具返回的冗长内容（超过 max_tool_content_length 的部分）
-        
+
         Args:
             messages: 原始消息列表
-            
+
         Returns:
             截断后的消息列表
         """
         # 分离系统消息和非系统消息
         system_messages = [msg for msg in messages if msg.get("role") == "system"]
         non_system_messages = [msg for msg in messages if msg.get("role") != "system"]
-        
+
         # 如果消息数量未超过限制，只截断工具返回的冗长内容
         if len(non_system_messages) <= self.max_messages:
             result = system_messages.copy()
@@ -420,15 +549,15 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                         )
                 result.append(msg_copy)
             return result
-        
+
         # 如果消息数量超过限制，需要按消息组进行截断
         # 消息组定义：一个 assistant 消息（可能包含 tool_calls）+ 对应的所有 tool 消息 = 一个组
         message_groups = []
         current_group = []
-        
+
         for msg in non_system_messages:
             role = msg.get("role")
-            
+
             if role == "assistant":
                 # 如果当前组不为空，先保存它
                 if current_group:
@@ -457,16 +586,16 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 if current_group:
                     message_groups.append(current_group)
                 current_group = [msg]
-        
+
         # 添加最后一个组
         if current_group:
             message_groups.append(current_group)
-        
+
         # 保留最近的 N 个消息组（但确保总消息数不超过 max_messages）
         # 从后往前取组，直到达到限制
         result_messages = []
         total_count = 0
-        
+
         for group in reversed(message_groups):
             group_size = len(group)
             if total_count + group_size <= self.max_messages:
@@ -485,19 +614,19 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                     if remaining > 0:
                         result_messages.insert(0, group[:remaining])
                     break
-        
+
         # 展平结果
         truncated_messages = []
         for group in result_messages:
             truncated_messages.extend(group)
-        
+
         truncated_count = len(non_system_messages) - len(truncated_messages)
         if truncated_count > 0:
             logger.warning(
                 f"Truncated message history: {len(non_system_messages)} -> {len(truncated_messages)} messages "
                 f"(removed {truncated_count} old messages, preserved {len(message_groups) - len(result_messages)} message groups)"
             )
-        
+
         # 合并系统消息和截断后的消息，并截断工具返回的冗长内容
         result = system_messages.copy()
         for msg in truncated_messages:
@@ -516,19 +645,20 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                         f"{len(content)} -> {self.max_tool_content_length} characters"
                     )
             result.append(msg_copy)
-        
+
         return result
 
-    def set_trace_context(self, trace_id: str = None, session_id: str = None, user_id: str = None, tags: List[str] = None, metadata: Dict = None):
+    def set_trace_context(self, trace_id: str = None, session_id: str = None, user_id: str = None,
+                          tags: List[str] = None, metadata: Dict = None):
         """设置Langfuse追踪上下文，用于组织和标识traces
-        
+
         Args:
             trace_id: 追踪ID（可选，如果为None则每次调用自动生成新的trace）
             session_id: 会话ID（用于将多个traces组合在一起）
             user_id: 用户ID（可选）
             tags: 标签列表（可选）
             metadata: 元数据（可选）
-        
+
         Note:
             推荐用法：
             - trace_id=None：让每个Agent调用自动生成独立的trace
@@ -541,7 +671,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
         self.current_user_id = user_id
         self.current_tags = tags or []
         self.current_metadata = metadata or {}
-        
+
         if langfuse_enabled and langfuse_client:
             if trace_id:
                 # 如果指定了 trace_id，创建固定的 trace 对象（旧模式）
@@ -567,25 +697,29 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
         else:
             self.langfuse_trace = None
             logger.info(f"Set trace context: trace_id={trace_id}, session_id={session_id} (Langfuse disabled)")
-    
+
     @time_record
-    def create_with_tools(self, messages: List[Dict[str, Any]], tools: List[Dict]):
+    def create_with_tools(self, messages: List[Dict[str, Any]], tools: List[Dict], current_tokens=None):
         """
         Create a chat completion with support for function/tool calls
         """
         # 清洗提示词，去除None
         messages = ChatLLM.clean_none_values(messages)
-        
+
         # 如果使用 thinking mode（deepseek-reasoner 或显式启用），确保历史消息中的 assistant 消息包含 reasoning_content
         use_thinking = self.thinking_mode or "reasoner" in self.model.lower()
         if use_thinking:
             # 为历史消息中的 assistant 消息补充空的 reasoning_content（如果缺失）
-            for msg in messages:
-                if msg.get("role") == "assistant" and "reasoning_content" not in msg:
-                    msg["reasoning_content"] = ""
-        
+            self._ensure_reasoning_content(messages)
+
         # 【新增】检查是否需要压缩上下文
-        should_compress, current_tokens = self._should_compress_context(messages)
+        messages, guard_report = self._apply_token_guard(messages, phase="create_with_tools")
+        if guard_report["guard_triggered"]:
+            logger.info(f"Token guard applied before tool call: {guard_report}")
+            self._record_token_guard_event(guard_report)
+            if use_thinking:
+                self._ensure_reasoning_content(messages)
+        should_compress = False
         if should_compress:
             logger.info(f"Triggering context compression (tokens: {current_tokens})...")
             try:
@@ -600,7 +734,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 logger.error(f"Context compression failed: {e}, falling back to truncation")
                 messages = self._truncate_messages(messages)
         # 如果不需要压缩，保留完整消息，不做任何截断处理
-        
+
         max_retries = 5
         response = None
         for attempt in range(max_retries):
@@ -613,11 +747,11 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                     "tool_choice": "auto",
                     "temperature": self.temperature
                 }
-                
+
                 # 如果启用了 thinking mode，添加 extra_body 参数
                 if use_thinking:
                     api_params["extra_body"] = {"thinking": {"type": "enabled"}}
-                
+
                 # Langfuse 追踪逻辑
                 if langfuse_enabled:
                     if self.langfuse_trace:
@@ -657,7 +791,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                             attrs["tags"] = self.current_tags
                         if self.current_metadata:
                             attrs["metadata"] = self.current_metadata
-                        
+
                         with propagate_attributes(**attrs):
                             response = self.client.chat.completions.create(**api_params)
                     else:
@@ -677,7 +811,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 break
             except json.JSONDecodeError as json_error:
                 logger.error(f"JSON decode error on attempt {attempt + 1}: {json_error}")
-                
+
                 # 更详细的错误信息记录
                 response_info = "No response object"
                 if response is not None:
@@ -687,15 +821,17 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                         response_info = f"Response text: {response.text}"
                     elif hasattr(response, 'choices') and response.choices:
                         try:
-                            content = response.choices[0].message.content if response.choices[0].message else "No message content"
-                            response_info = f"Response message content: {content[:500]}..." if len(str(content)) > 500 else f"Response message content: {content}"
+                            content = response.choices[0].message.content if response.choices[
+                                0].message else "No message content"
+                            response_info = f"Response message content: {content[:500]}..." if len(
+                                str(content)) > 500 else f"Response message content: {content}"
                         except Exception:
                             response_info = f"Response object: {type(response)} - {str(response)[:500]}..."
                     else:
                         response_info = f"Response object: {type(response)} - {str(response)[:500]}..."
-                
+
                 logger.error(f"Response details: {response_info}")
-                
+
                 if attempt == max_retries - 1:
                     raise ZaeFrameworkException(400, f"JSON decode error after {max_retries} attempts: {json_error}")
                 time.sleep(5)  # 增加等待时间
@@ -709,8 +845,29 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                     )
                     # 更激进地截断消息：减少保留的消息数量
                     original_max = self.max_messages
+                    retry_guard_report = {
+                        "phase": "retry_after_context_length",
+                        "guard_triggered": True,
+                        "estimated_tokens_before": self._count_tokens(messages),
+                        "threshold_tokens": int(self.max_context_tokens * self.compression_threshold),
+                        "max_context_tokens": self.max_context_tokens,
+                        "threshold_ratio": self.compression_threshold,
+                        "actions": [],
+                        "retry_count": attempt + 1,
+                    }
                     self.max_messages = max(5, self.max_messages - 5)  # 每次减少5条，最少保留5条
                     messages = self._truncate_messages(messages)
+                    retry_guard_report["actions"].append({
+                        "type": "reduce_max_messages",
+                        "before": original_max,
+                        "after": self.max_messages,
+                    })
+                    retry_guard_report["actions"].append({
+                        "type": "truncate_messages",
+                        "after_message_count": len(messages),
+                    })
+                    retry_guard_report["final_estimated_tokens"] = self._count_tokens(messages)
+                    self._record_token_guard_event(retry_guard_report)
                     logger.info(
                         f"Reduced max_messages from {original_max} to {self.max_messages}, "
                         f"current message count: {len(messages)}"
@@ -718,7 +875,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                     # 继续重试
                     time.sleep(2)
                     continue
-                
+
                 logger.warning(f"chat with LLM error: {e} on attempt {attempt + 1}, retrying...", exc_info=True)
                 if "TPM limit reached" in error_str:
                     time.sleep(60)
@@ -726,7 +883,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                     time.sleep(30)
                 elif "timeout" in error_str.lower():
                     time.sleep(10)
-                if attempt == max_retries-1:
+                if attempt == max_retries - 1:
                     logger.error(f"Failed to create after {max_retries} attempts.")
                     raise ZaeFrameworkException(400, f"chat with LLM failed, please check LLM config. reason：{e}")
                 time.sleep(3)  # 增加等待时间，避免频繁重试
@@ -750,11 +907,11 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 except JSONDecodeError as jsone:
                     logger.warning(f"Tool call arguments JSON decode error on attempt {attempt + 1}: {jsone}")
                     logger.warning(f"Invalid arguments: {tool_call.arguments}")
-                    
+
                     try:
                         # 尝试修复JSON格式
                         fixed_arguments = self.chat_to_llm([{"role": "user",
-                                                           "content": f"下面的json字符串格式有错误，请帮忙修正。重要：仅输出修正的字符串。\n{tool_call.arguments}"}])
+                                                             "content": f"下面的json字符串格式有错误，请帮忙修正。重要：仅输出修正的字符串。\n{tool_call.arguments}"}])
                         # 验证修复后的JSON是否有效
                         json.loads(fixed_arguments)
                         tool_call.arguments = fixed_arguments
@@ -772,7 +929,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
     def chat_to_llm(self, messages: List[Dict[str, Any]], max_tokens: int = None):
         # 清洗提示词，去除None
         messages = ChatLLM.clean_none_values(messages)
-        
+
         # 如果使用 thinking mode（deepseek-reasoner 或显式启用），确保历史消息中的 assistant 消息包含 reasoning_content
         use_thinking = self.thinking_mode or "reasoner" in self.model.lower()
         if use_thinking:
@@ -780,7 +937,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
             for msg in messages:
                 if msg.get("role") == "assistant" and "reasoning_content" not in msg:
                     msg["reasoning_content"] = ""
-        
+
         # 【新增】检查是否需要压缩上下文
         should_compress, current_tokens = self._should_compress_context(messages)
         if should_compress:
@@ -797,24 +954,24 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 logger.error(f"Context compression failed: {e}, falling back to truncation")
                 messages = self._truncate_messages(messages)
         # 如果不需要压缩，保留完整消息，不做任何截断处理
-        
+
         # 构建API调用参数
         api_params = {
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature
         }
-        
+
         # 如果指定了max_tokens，或者实例有max_tokens配置，则使用它
         if max_tokens is not None:
             api_params["max_tokens"] = max_tokens
         elif self.max_tokens is not None:
             api_params["max_tokens"] = self.max_tokens
-        
+
         # 如果启用了 thinking mode，添加 extra_body 参数
         if use_thinking:
             api_params["extra_body"] = {"thinking": {"type": "enabled"}}
-        
+
         # Langfuse 追踪逻辑
         if langfuse_enabled:
             if self.langfuse_trace:
@@ -852,7 +1009,7 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                     attrs["tags"] = self.current_tags
                 if self.current_metadata:
                     attrs["metadata"] = self.current_metadata
-                
+
                 with propagate_attributes(**attrs):
                     response = self.client.chat.completions.create(**api_params)
             else:

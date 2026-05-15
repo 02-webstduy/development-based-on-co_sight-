@@ -13,6 +13,19 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from app.cosight.agent.contest_mode import (
+    contest_create_plan_append,
+    contest_finalize_append,
+    contest_planner_system_append,
+    contest_replan_append,
+    is_contest_mode,
+)
+
+
+def _contest_append(text: str, suffix: str) -> str:
+    return text + suffix if is_contest_mode() else text
+
+
 def planner_system_prompt(question):
     import sys
     import os
@@ -20,10 +33,11 @@ def planner_system_prompt(question):
     # Add path to import llm.py
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
     from llm import llm_for_plan
-    from config.config import get_turbo_mode
+    from config.config import get_turbo_mode, get_contest_mode
     
     # 检查是否启用急速模式
     turbo_mode = get_turbo_mode()
+    contest_mode = get_contest_mode()
     
     # 检查是否使用Claude模型
     is_claude = False
@@ -90,7 +104,7 @@ You are an efficient planning assistant. In turbo mode, create the most streamli
 # Finalization Rules
 1. Brief summary of success or failure
 """
-        return system_prompt
+        return _contest_append(system_prompt, contest_planner_system_append())
     
     # 根据模型类型调整规划指导
     if is_claude and contains_chinese:
@@ -275,7 +289,7 @@ title: Develop a web application
 steps: ["Requirements gathering", "System design", "Database design", "Frontend development", "Backend development", "Testing", "Deployment"]
 dependencies: {1: [0], 2: [0], 3: [1], 4: [1], 5: [3, 4], 6: [5]}
 """
-    return system_prompt
+    return _contest_append(system_prompt, contest_planner_system_append())
 
 
 def planner_create_plan_prompt(question, output_format=""):
@@ -351,7 +365,7 @@ Ensure your final answer contains only the content in the following format: {out
 """
     if output_format:
         create_plan_prompt += output_format_prompt
-    return create_plan_prompt
+    return _contest_append(create_plan_prompt, contest_create_plan_append())
 
 
 def planner_re_plan_prompt(question, plan, output_format=""):
@@ -403,7 +417,7 @@ Turbo mode replanning:
                 replan_prompt += f"\n确保你的最终答案仅包含以下格式的内容：{output_format}"
             else:
                 replan_prompt += f"\nEnsure your final answer contains only the content in the following format: {output_format}"
-        return replan_prompt
+        return _contest_append(replan_prompt, contest_replan_append())
     
     if contains_chinese:
         replan_prompt = f"""
@@ -458,7 +472,7 @@ Current plan status:
 Evaluate and adjust the current plan according to the replanning rules in the system prompt.
     """
 
-    return replan_prompt
+    return _contest_append(replan_prompt, contest_replan_append())
 
 
 def planner_finalize_plan_prompt(question, plan, output_format=""):
@@ -539,4 +553,4 @@ Please generate a detailed task summary report based on the above information, i
 - If the task failed, output the main reasons for failure and improvement suggestions
 - Don't create another plan, just summarize the current plan
 """
-    return finalize_prompt
+    return _contest_append(finalize_prompt, contest_finalize_append(output_format))

@@ -18,11 +18,20 @@ import platform
 import inspect
 import sys
 from app.common.logger_util import logger
+from app.cosight.agent.contest_mode import (
+    contest_actor_system_append,
+    contest_execute_task_append,
+    is_contest_mode,
+)
 
 # Add path to import llm.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
 from llm import llm_for_act
 from config.config import get_turbo_mode
+
+
+def _contest_append(text: str, suffix: str) -> str:
+    return text + suffix if is_contest_mode() else text
 
 def actor_system_prompt(work_space_path: str):
     # 检查是否启用急速模式
@@ -60,7 +69,7 @@ You are a task execution assistant in TURBO MODE. Focus on efficiency and minima
 
 Work efficiently. Save files only when producing final outputs.
 """
-        return system_prompt
+        return _contest_append(system_prompt, contest_actor_system_append())
     
     report_tool_guidance = """
 # Report-Specific Enhancement Rules
@@ -159,7 +168,7 @@ You are an assistant helping complete complex tasks. Your goal is to execute tas
 - WorkSpace: {work_space_path or os.getenv("WORKSPACE_PATH") or os.getcwd()}
 - Encoding: UTF-8 (must be used for all file operations)
 """
-    return system_prompt
+    return _contest_append(system_prompt, contest_actor_system_append())
 
 def actor_execute_task_prompt(task, step_index, plan, workspace_path: str):
     workspace_path = workspace_path if workspace_path else os.environ.get("WORKSPACE_PATH") or os.getcwd()
@@ -213,7 +222,7 @@ Focus on efficiency and completing the task with minimal tool calls.
 
 Work efficiently with minimal tool calls. No file generation in intermediate steps.
 """
-        return execute_task_prompt
+        return _contest_append(execute_task_prompt, contest_execute_task_append(is_last_step))
     
     print(f"is_last_step:{is_last_step}")
 
@@ -284,7 +293,7 @@ Follow the general task execution rules above.
   5. IMPORTANT: All extracted information must be 100% faithful to the original search results
   6. Never skip this extraction step after search operations
 """
-    return execute_task_prompt
+    return _contest_append(execute_task_prompt, contest_execute_task_append(is_last_step))
 
 
 def actor_system_prompt_zh(work_space_path):
@@ -323,7 +332,7 @@ def actor_system_prompt_zh(work_space_path):
 
 高效工作。仅在生成最终输出时保存文件。
 """
-        return system_prompt
+        return _contest_append(system_prompt, contest_actor_system_append())
     
     report_tool_guidance = """
 # 报告特定增强规则
@@ -394,7 +403,7 @@ def actor_system_prompt_zh(work_space_path):
 - 工作区: {work_space_path or os.getenv("WORKSPACE_PATH") or os.getcwd()}
 - 编码: UTF-8（所有文件操作必须使用该编码）
 """
-    return system_prompt
+    return _contest_append(system_prompt, contest_actor_system_append())
 
 
 def actor_execute_task_prompt_zh(task, step_index, plan, workspace_path):
@@ -448,7 +457,7 @@ def actor_execute_task_prompt_zh(task, step_index, plan, workspace_path):
 
 高效工作，最少的工具调用。中间步骤不生成文件。
 """
-        return execute_task_prompt
+        return _contest_append(execute_task_prompt, contest_execute_task_append(is_last_step))
     
     print(f"is_last_step:{is_last_step}")
     report_guidance = """
@@ -497,5 +506,5 @@ def actor_execute_task_prompt_zh(task, step_index, plan, workspace_path):
   5. 重要提示：所有提取的信息必须完全忠实于原始搜索结果
   6. 不得跳过搜索操作后的提取步骤
 """
-    return execute_task_prompt
+    return _contest_append(execute_task_prompt, contest_execute_task_append(is_last_step))
 
