@@ -17,10 +17,10 @@ import inspect
 import json
 import sys
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from app.agent_dispatcher.domain.plan.action.skill.mcp.engine import MCPEngine
 from app.agent_dispatcher.infrastructure.entity.AgentInstance import AgentInstance
 from app.cosight.agent.base.skill_to_tool import convert_skill_to_tool,get_mcp_tools,convert_mcp_tools
@@ -29,6 +29,7 @@ from app.cosight.task.time_record_util import time_record
 from app.cosight.tool.tool_result_processor import ToolResultProcessor
 from app.cosight.task.plan_report_manager import plan_report_event_manager
 from app.common.logger_util import logger
+from app.common.http_timeout import get_tool_exec_timeout, tool_timeout_message
 from app.cosight.agent.base.tool_arg_mapping import FUNCTION_ARG_MAPPING
 from config.config import get_turbo_mode
 
@@ -51,6 +52,32 @@ class BaseAgent:
         # Only set plan to None if it hasn't been set by subclass
         if not hasattr(self, 'plan'):
             self.plan = None  # Will be set by subclasses that have access to Plan
+
+    def _truncate_tool_result_for_context(self, tool_name: str, tool_result: str) -> str:
+        raw_text = "" if tool_result is None else str(tool_result)
+        cleaned_text = raw_text.replace("\x00", "")
+        limit = getattr(self.llm, "max_tool_content_length", 50000)
+        truncated_text = cleaned_text
+        if limit and len(cleaned_text) > limit:
+            truncated_text = (
+                cleaned_text[:limit]
+                + f"\n\n[tool result truncated: original_length={len(raw_text)}, "
+                + f"cleaned_length={len(cleaned_text)}, limit={limit}]"
+            )
+        logger.info(
+            f"[TOOL_CONTEXT] tool_name={tool_name} raw_length={len(raw_text)} "
+            f"cleaned_length={len(cleaned_text)} truncated_length={len(truncated_text)}"
+        )
+        return truncated_text
+
+    def _format_tool_error_for_context(self, tool_name: str, error: Exception | str) -> str:
+        error_text = str(error)
+        short_error = error_text[:500] + ("..." if len(error_text) > 500 else "")
+        return (
+            f"Tool `{tool_name}` failed: {type(error).__name__ if isinstance(error, Exception) else 'Error'}: "
+            f"{short_error}\n"
+            "Do not treat this as evidence. Try an alternative tool, query, data source, or a direct calculation path before finalizing."
+        )
 
     def _normalize_tool_args(self, function_to_call, raw_args: Dict[str, Any], function_name: str = "") -> Dict[str, Any]:
         """
@@ -438,38 +465,63 @@ class BaseAgent:
 
     def _execute_tool_calls(self, tool_calls, step_index):
         results = []
+        tool_timeout = get_tool_exec_timeout()
         with ThreadPoolExecutor() as executor:
-            futures = []
+            pending: List[Tuple] = []
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
                 function_args = tool_call.function.arguments
 
                 if function_name in self.functions:
-                    futures.append(executor.submit(
+                    future = executor.submit(
                         self._execute_tool_call,
                         function_name=function_name,
                         function_args=function_args,
                         tool_call_id=tool_call.id,
                         step_index=step_index
-                    ))
+                    )
                 else:
-                    futures.append(executor.submit(
+                    future = executor.submit(
                         self._execute_mcp_tool_call,
                         function_name=function_name,
                         function_args=function_args,
                         tool_call_id=tool_call.id
-                    ))
+                    )
+                pending.append((future, function_name, tool_call.id))
 
-            for future in futures:
+            for future, function_name, tool_call_id in pending:
                 try:
-                    results.append(future.result())
+                    results.append(future.result(timeout=tool_timeout))
+                except FuturesTimeoutError:
+                    logger.error(
+                        f"Tool execution timed out after {tool_timeout}s: {function_name}",
+                        exc_info=True,
+                    )
+                    self._push_tool_event(
+                        "tool_error",
+                        function_name,
+                        "",
+                        "",
+                        step_index,
+                        tool_timeout,
+                        tool_timeout_message(function_name, tool_timeout),
+                    )
+                    results.append({
+                        "role": "tool",
+                        "name": function_name,
+                        "tool_call_id": tool_call_id,
+                        "content": self._format_tool_error_for_context(
+                            function_name,
+                            tool_timeout_message(function_name, tool_timeout),
+                        ),
+                    })
                 except Exception as e:
                     logger.error(f"Unhandled exception: {e}", exc_info=True)
                     results.append({
                         "role": "tool",
                         "name": function_name,
-                        "tool_call_id": tool_call.id,
-                        "content": f"Execution error: {str(e)}"
+                        "tool_call_id": tool_call_id,
+                        "content": self._format_tool_error_for_context(function_name, e)
                     })
         return results
 
@@ -564,10 +616,12 @@ class BaseAgent:
                 except Exception as e:
                     logger.warning(f"Failed to record tool call to plan: {e}")
 
+            context_result = self._truncate_tool_result_for_context(function_name, str(result))
+
             return {
                 "role": "tool",
                 "name": function_name,
-                "content": str(result),
+                "content": context_result,
                 "tool_call_id": tool_call_id
             }
         except Exception as e:
@@ -583,7 +637,7 @@ class BaseAgent:
                 "role": "tool",
                 "name": function_name,
                 "tool_call_id": tool_call_id,
-                "content": f"Execution error: {str(e)}"
+                "content": self._format_tool_error_for_context(function_name, e)
             }
 
     def _filter_mcp_tool_args(self, function_name: str, args_dict: Dict[str, Any]) -> Dict[str, Any]:

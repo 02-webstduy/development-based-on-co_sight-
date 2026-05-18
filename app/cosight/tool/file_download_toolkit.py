@@ -18,6 +18,7 @@ import requests
 from tqdm import tqdm
 
 from app.common.logger_util import logger
+from app.common.http_timeout import get_http_timeout
 
 def download_file(url, dest_path):
     chunk_size = 1024
@@ -31,7 +32,7 @@ def download_file(url, dest_path):
         # 发起请求，获取文件大小
     proxy = os.environ.get("PROXY")
     proxies = {"http": proxy, "https": proxy} if proxy else None
-    with requests.get(url, stream=True, proxies=proxies) as response:
+    with requests.get(url, stream=True, proxies=proxies, timeout=get_http_timeout()) as response:
         response.raise_for_status()
         total_size = int(response.headers.get('Content-Length', 0))
 

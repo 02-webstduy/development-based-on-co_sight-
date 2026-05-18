@@ -68,6 +68,18 @@ class MessageService {
                 console.log('收到 lui-message-manus-step 消息，开始创建DAG图');
                 console.log('完整消息数据:', messageData);
                 this.stepMessageHandler(messageData);
+                return;
+            }
+
+            if (messageType === 'multi-modal') {
+                const initData = messageData.data?.content || messageData.data?.initData || [];
+                const text = Array.isArray(initData)
+                    ? initData.filter(item => item && item.type === 'text').map(item => item.value || '').join('\n\n')
+                    : '';
+                if (text && messageData.data?.from === 'ai') {
+                    this.renderFinalAnswer(text);
+                    return;
+                }
             } else {
                 console.log('收到其他类型的消息:', messageType || 'unknown');
             }
@@ -104,6 +116,10 @@ class MessageService {
                 hideStepsTooltip();
             }, 3000);
         }
+
+        if (initData && typeof initData.result === 'string' && initData.result.trim()) {
+            this.renderFinalAnswer(initData.result);
+        }
         
         // 在接收到步骤状态更新后，自动关闭已完成且无运行中工具的步骤面板
         try {
@@ -112,6 +128,42 @@ class MessageService {
             }
         } catch (e) {
             console.warn('自动关闭完成步骤面板时发生异常:', e);
+        }
+    }
+
+    renderFinalAnswer(answerText) {
+        const text = (answerText || '').trim();
+        if (!text) {
+            return;
+        }
+        try {
+            if (typeof showRightPanel === 'function') {
+                showRightPanel();
+            }
+            const iframe = document.getElementById('content-iframe');
+            const markdownContent = document.getElementById('markdown-content');
+            const statusElement = document.getElementById('right-container-status');
+            if (iframe) {
+                iframe.style.display = 'none';
+                iframe.src = 'about:blank';
+            }
+            if (markdownContent) {
+                markdownContent.style.display = 'block';
+                const markdown = `## Final Answer\n\n${text}`;
+                markdownContent.innerHTML = (window.marked && typeof marked.parse === 'function')
+                    ? marked.parse(markdown)
+                    : markdown.replace(/\n/g, '<br>');
+            }
+            if (statusElement) {
+                statusElement.textContent = '执行完成';
+                statusElement.className = 'success';
+            }
+            localStorage.setItem('cosight:lastFinalAnswer', JSON.stringify({
+                answer: text,
+                savedAt: Date.now()
+            }));
+        } catch (e) {
+            console.error('渲染最终答案失败:', e);
         }
     }
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Literal, Optional, TypeAlias, Union
 import requests
 
 from app.common.logger_util import logger
+from app.common.http_timeout import get_http_timeout
 
 class SearchToolkit:
     r"""A class representing a toolkit for web search.
@@ -31,6 +32,7 @@ class SearchToolkit:
     def __init__(self):
         proxy = os.environ.get("PROXY")
         self.proxies = {"http": proxy, "https": proxy} if proxy else None
+        self.http_timeout = get_http_timeout()
 
     def search_wiki(self, entity: str) -> str:
         r"""Search the entity in WikiPedia and return the summary of the
@@ -382,7 +384,9 @@ class SearchToolkit:
             "summary": summary,
         }
 
-        response = requests.get(url, headers=headers, params=params, proxies=self.proxies)
+        response = requests.get(
+            url, headers=headers, params=params, proxies=self.proxies, timeout=self.http_timeout
+        )
         data = response.json()["web"]
         return data
 
@@ -444,7 +448,7 @@ class SearchToolkit:
         # Fetch the results given the URL
         try:
             # Make the get
-            result = requests.get(url, proxies=self.proxies)
+            result = requests.get(url, proxies=self.proxies, timeout=self.http_timeout)
             data = result.json()
 
             # Get the result items
@@ -631,7 +635,7 @@ class SearchToolkit:
         }
 
         # Send the request
-        response = requests.get(url, params=params, proxies=self.proxies)
+        response = requests.get(url, params=params, proxies=self.proxies, timeout=self.http_timeout)
         root = ET.fromstring(response.text)
 
         # Extracting step-by-step steps, including 'SBSStep' and 'SBSHintStep'

@@ -32,6 +32,7 @@ import asyncio
 import nest_asyncio
 from app.cosight.tool.excel_toolkit import extract_excel_content
 from app.common.logger_util import logger
+from app.common.http_timeout import get_http_timeout
 
 nest_asyncio.apply()
 
@@ -183,7 +184,7 @@ class DocumentProcessingToolkit:
     def _download_file(self, url: str):
         r"""Download a file from a URL and save it to the cache directory."""
         try:
-            response = requests.get(url, stream=True, proxies=self.proxies)
+            response = requests.get(url, stream=True, proxies=self.proxies, timeout=get_http_timeout())
             response.raise_for_status()
             file_name = url.split("/")[-1]
 

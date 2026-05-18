@@ -456,6 +456,33 @@ async def search(request: Request, params: Any = Body(None)):
         latest_plan = None
         # 本次会话内已触发可信分析的步骤集合，避免重复分析
         analyzed_steps_local = set()
+        final_answer_emitted = False
+
+        def _short_text_for_frontend(value: Any, limit: int = 1200) -> str:
+            text = "" if value is None else str(value)
+            if len(text) <= limit:
+                return text
+            return text[:limit] + f"\n...[frontend truncated {len(text) - limit} chars]"
+
+        def _slim_step_tool_calls(step_tool_calls: Any) -> Any:
+            if not isinstance(step_tool_calls, dict):
+                return step_tool_calls
+            slim = {}
+            for step, calls in step_tool_calls.items():
+                if not isinstance(calls, list):
+                    slim[step] = calls
+                    continue
+                slim_calls = []
+                for call in calls:
+                    if not isinstance(call, dict):
+                        slim_calls.append(call)
+                        continue
+                    slim_call = dict(call)
+                    slim_call["tool_args"] = _short_text_for_frontend(slim_call.get("tool_args"), 600)
+                    slim_call["tool_result"] = _short_text_for_frontend(slim_call.get("tool_result"), 1200)
+                    slim_calls.append(slim_call)
+                slim[step] = slim_calls
+            return slim
 
         def append_create_plan_local(data: Any):
             """
@@ -478,7 +505,7 @@ async def search(request: Request, params: Any = Body(None)):
                         "step_statuses": plan_obj.step_statuses if hasattr(plan_obj, 'step_statuses') else {},
                         "step_notes": plan_obj.step_notes if hasattr(plan_obj, 'step_notes') else {},
                         "step_details": plan_obj.step_details if hasattr(plan_obj, 'step_details') else {},
-                        "step_tool_calls": plan_obj.step_tool_calls if hasattr(plan_obj, 'step_tool_calls') else {},
+                        "step_tool_calls": _slim_step_tool_calls(plan_obj.step_tool_calls) if hasattr(plan_obj, 'step_tool_calls') else {},
                         "dependencies": {str(k): v for k, v in plan_obj.dependencies.items()} if hasattr(plan_obj,
                                                                                                      'dependencies') else {},
                         "progress": plan_obj.get_progress() if hasattr(plan_obj, 'get_progress') and callable(
@@ -703,6 +730,13 @@ async def search(request: Request, params: Any = Body(None)):
                     completed_plan = dict(latest_plan)
                     completed_plan["statusText"] = "执行完成"
                     yield {"plan": completed_plan}
+                    if not final_answer_emitted:
+                        final_answer_emitted = True
+                        yield {
+                            "contentType": "multi-modal",
+                            "changeType": "append",
+                            "content": [{"type": "text", "value": str(completed_plan.get("result", ""))}]
+                        }
                     # 标记为已完成，记录完成时间，后续在一个尾部时间窗口内继续收集可信分析等事件
                     import time as _time
                     plan_completed = True
@@ -730,7 +764,7 @@ async def search(request: Request, params: Any = Body(None)):
                 if plan_completed:
                     import time as _time
                     # 默认尾部等待 180 秒，可根据需要调整
-                    TAIL_WINDOW_SECONDS = 180.0
+                    TAIL_WINDOW_SECONDS = float(os.environ.get("CREDIBILITY_TAIL_WINDOW_SECONDS", "20"))
                     # 确保已记录完成时间
                     plan_completed_time = plan_completed_time or _time.monotonic()
                     elapsed = _time.monotonic() - plan_completed_time
@@ -778,8 +812,18 @@ async def search(request: Request, params: Any = Body(None)):
     async def generate_stream_response(generator_func, params):
         try:
             async for response_data in generator_func():
+                if isinstance(response_data, dict) and response_data.get("contentType"):
+                    response_json = {
+                        "contentType": response_data.get("contentType"),
+                        "sessionInfo": params.get("sessionInfo", {}),
+                        "code": 0,
+                        "message": "ok",
+                        "task": response_data.get("task", "chat"),
+                        "changeType": response_data.get("changeType", "append"),
+                        "content": response_data.get("content")
+                    }
                 # 可信分析事件优先匹配
-                if isinstance(response_data, dict) and response_data.get("type") in ("credibility-analysis", "lui-message-credibility-analysis"):
+                elif isinstance(response_data, dict) and response_data.get("type") in ("credibility-analysis", "lui-message-credibility-analysis"):
                     try:
                         logger.info("发送可信分析消息到前端")
                     except Exception:

@@ -15,6 +15,7 @@
 
 import shlex
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List
@@ -44,7 +45,6 @@ class SubprocessInterpreter(BaseInterpreter):
     """
 
     _CODE_EXECUTE_CMD_MAPPING: ClassVar[Dict[str, str]] = {
-        "python": "python {file_name}",
         "bash": "bash {file_name}",
         "r": "Rscript {file_name}",
     }
@@ -77,6 +77,17 @@ class SubprocessInterpreter(BaseInterpreter):
         self.print_stdout = print_stdout
         self.print_stderr = print_stderr
 
+    @staticmethod
+    def _build_command(code_type: str, file_name: Path) -> List[str]:
+        """Build argv for subprocess; Python uses the current interpreter (venv)."""
+        if code_type == "python":
+            return [sys.executable, str(file_name)]
+        if code_type == "bash":
+            return ["bash", str(file_name)]
+        if code_type == "r":
+            return ["Rscript", str(file_name)]
+        raise InterpreterError(f"Unsupported code type for command build: {code_type}")
+
     def run_file(
         self,
         file: Path,
@@ -103,8 +114,6 @@ class SubprocessInterpreter(BaseInterpreter):
         if self._CODE_TYPE_MAPPING[code_type] == "python":
             # For Python code, use ast to analyze and modify the code
             import ast
-
-            import astor
 
             with open(file, 'r') as f:
                 source = f.read()
@@ -153,24 +162,30 @@ class SubprocessInterpreter(BaseInterpreter):
                     # Fix missing source locations
                     ast.fix_missing_locations(tree)
                     # Convert back to source
-                    modified_source = astor.to_source(tree)
+                    try:
+                        import astor
+                        modified_source = astor.to_source(tree)
+                    except ImportError:
+                        if hasattr(ast, "unparse"):
+                            modified_source = ast.unparse(tree)
+                        else:
+                            modified_source = source
                     # Create a temporary file with the modified source
                     temp_file = self._create_temp_file(modified_source, "py")
-                    cmd = shlex.split(f"python {temp_file!s}")
+                    cmd = self._build_command("python", temp_file)
             except SyntaxError:
                 # If parsing fails, run the original file
+                cmd = self._build_command(code_type, file)
+        else:
+            # For non-Python code, use standard execution
+            if code_type in self._CODE_EXECUTE_CMD_MAPPING:
                 cmd = shlex.split(
                     self._CODE_EXECUTE_CMD_MAPPING[code_type].format(
                         file_name=str(file)
                     )
                 )
-        else:
-            # For non-Python code, use standard execution
-            cmd = shlex.split(
-                self._CODE_EXECUTE_CMD_MAPPING[code_type].format(
-                    file_name=str(file)
-                )
-            )
+            else:
+                cmd = self._build_command(code_type, file)
 
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True

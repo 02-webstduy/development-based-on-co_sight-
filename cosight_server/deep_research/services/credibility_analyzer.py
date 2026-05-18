@@ -44,6 +44,23 @@ class CredibilityAnalyzer:
             "educated_guess": "Educated Guess"
         }
     
+    def _truncate_prompt_for_llm(self, prompt: str, tool_events: List[Dict[str, Any]]) -> str:
+        max_chars = int(os.environ.get("CREDIBILITY_MAX_INPUT_CHARS", "12000"))
+        original_length = len(prompt)
+        total_event_chars = sum(len(str(evt)) for evt in (tool_events or []))
+        truncated_prompt = prompt
+        if max_chars and len(prompt) > max_chars:
+            truncated_prompt = (
+                prompt[:max_chars]
+                + f"\n\n[credibility input truncated: original_length={original_length}, limit={max_chars}]"
+            )
+        logger.info(
+            f"[CREDIBILITY_CONTEXT] documents={len(tool_events or [])} "
+            f"tool_events_chars={total_event_chars} before_length={original_length} "
+            f"after_length={len(truncated_prompt)}"
+        )
+        return truncated_prompt
+
     def _detect_language(self, text: str) -> str:
         """检测文本语言，返回'zh'或'en'"""
         if not text:
@@ -257,6 +274,7 @@ Please start analysis:"""
             prompt = self._get_credibility_prompt(current_content, all_content, tool_events_summary, tool_events_json, language)
             
             # 调用LLM分析
+            prompt = self._truncate_prompt_for_llm(prompt, tool_events)
             messages = [{"role": "user", "content": prompt}]
             logger.info(f"开始调用LLM进行可信信息分析，语言: {language}, prompt长度: {len(prompt)}")
             

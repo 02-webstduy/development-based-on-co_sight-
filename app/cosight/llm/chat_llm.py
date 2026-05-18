@@ -15,6 +15,7 @@
 import json
 import os
 import time
+import inspect
 from json import JSONDecodeError
 from typing import List, Dict, Any, Optional
 from contextvars import ContextVar
@@ -168,6 +169,54 @@ class ChatLLM:
             logger.debug(f"Current tokens: {current_tokens} / {threshold_tokens} ({current_tokens/threshold_tokens*100:.1f}%)")
         
         return False, current_tokens
+
+    def _infer_call_source(self) -> str:
+        try:
+            for frame in inspect.stack()[2:10]:
+                filename = frame.filename.replace("\\", "/")
+                function = frame.function
+                if "credibility_analyzer.py" in filename:
+                    return "credibility_analyzer"
+                if "task_plannr_agent.py" in filename:
+                    if function == "final_answer":
+                        return "finalizer"
+                    return "planner"
+                if "task_actor_agent.py" in filename or "base_agent.py" in filename:
+                    return "actor"
+                if "html_visualization_toolkit.py" in filename:
+                    return "tool_llm"
+            return "unknown"
+        except Exception:
+            return "unknown"
+
+    def _message_content_length(self, message: Dict[str, Any]) -> int:
+        length = len(str(message.get("content", "")))
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            length += len(str(tool_calls))
+        return length
+
+    def _log_message_stats(self, messages: List[Dict[str, Any]], call_source: str, phase: str) -> None:
+        try:
+            lengths = [(idx, msg.get("role", "unknown"), self._message_content_length(msg)) for idx, msg in enumerate(messages)]
+            total_chars = sum(item[2] for item in lengths)
+            largest = sorted(lengths, key=lambda item: item[2], reverse=True)[:3]
+            role_lengths = ", ".join(f"{idx}:{role}:{length}" for idx, role, length in lengths)
+            largest_text = ", ".join(f"{idx}:{role}:{length}" for idx, role, length in largest)
+            first_content = ""
+            for msg in messages:
+                content = str(msg.get("content", ""))
+                if content:
+                    first_content = content[:200].replace("\n", "\\n").replace("\r", "\\r")
+                    break
+            logger.info(
+                f"[LLM_CONTEXT] source={call_source} phase={phase} "
+                f"messages={len(messages)} total_chars={total_chars} "
+                f"role_lengths=[{role_lengths}] largest3=[{largest_text}] "
+                f"preview={first_content}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log LLM context stats: {e}")
 
     def _format_messages_for_compression(self, messages: List[Dict[str, Any]]) -> str:
         """将消息格式化为适合压缩的文本"""
@@ -583,7 +632,10 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
             for msg in messages:
                 if msg.get("role") == "assistant" and "reasoning_content" not in msg:
                     msg["reasoning_content"] = ""
-        
+
+        call_source = self._infer_call_source()
+        self._log_message_stats(messages, call_source, "before_context_management")
+
         # 【新增】检查是否需要压缩上下文
         should_compress, current_tokens = self._should_compress_context(messages)
         if should_compress:
@@ -599,8 +651,10 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
             except Exception as e:
                 logger.error(f"Context compression failed: {e}, falling back to truncation")
                 messages = self._truncate_messages(messages)
-        # 如果不需要压缩，保留完整消息，不做任何截断处理
-        
+        else:
+            messages = self._truncate_messages(messages)
+        self._log_message_stats(messages, call_source, "before_api_call")
+
         max_retries = 5
         response = None
         for attempt in range(max_retries):
@@ -781,6 +835,9 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
                 if msg.get("role") == "assistant" and "reasoning_content" not in msg:
                     msg["reasoning_content"] = ""
         
+        call_source = self._infer_call_source()
+        self._log_message_stats(messages, call_source, "before_context_management")
+
         # 【新增】检查是否需要压缩上下文
         should_compress, current_tokens = self._should_compress_context(messages)
         if should_compress:
@@ -796,8 +853,10 @@ Keep facts, data, file paths. Remove redundancy. Output summary only:"""
             except Exception as e:
                 logger.error(f"Context compression failed: {e}, falling back to truncation")
                 messages = self._truncate_messages(messages)
-        # 如果不需要压缩，保留完整消息，不做任何截断处理
-        
+        else:
+            messages = self._truncate_messages(messages)
+        self._log_message_stats(messages, call_source, "before_api_call")
+
         # 构建API调用参数
         api_params = {
             "model": self.model,
