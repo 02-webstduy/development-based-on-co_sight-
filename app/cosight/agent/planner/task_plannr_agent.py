@@ -13,7 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from typing import Dict, Optional
+from typing import Dict
 
 from app.agent_dispatcher.infrastructure.entity.AgentInstance import AgentInstance
 from app.cosight.agent.base.base_agent import BaseAgent
@@ -24,7 +24,6 @@ from app.cosight.task.plan_report_manager import plan_report_event_manager
 from app.cosight.task.task_manager import TaskManager
 from app.cosight.tool.plan_toolkit import PlanToolkit
 from app.cosight.tool.terminate_toolkit import TerminateToolkit
-from app.cosight.research.research_guard import ResearchGuard
 
 
 class TaskPlannerAgent(BaseAgent):
@@ -50,28 +49,19 @@ class TaskPlannerAgent(BaseAgent):
         result = self.execute(self.history, max_iteration=1)
         return result
 
-    def finalize_plan(self, question, output_format="", guard: Optional[ResearchGuard] = None):
-        plan_summary = self.plan.format()
-        if guard and guard.enabled:
-            plan_summary = (
-                f"{plan_summary}\n\n"
-                f"--- Research context (compressed) ---\n"
-                f"{guard.compressed_context_block()[:4000]}\n"
-            )
+    def finalize_plan(self, question, output_format=""):
         self.history.append(
-            {"role": "user", "content": planner_finalize_plan_prompt(question, plan_summary, output_format)}
-        )
-        if guard and guard.enabled and guard.requires_external_evidence():
-            self.history.append({
-                "role": "user",
-                "content": (
-                    "Deep research finalize rules:\n"
-                    "- If evidence is insufficient, output FINAL_ANSWER: Unable to determine\n"
-                    "- Do NOT invent numeric answers from internal knowledge\n"
-                    "- Unverified estimates must NOT appear in FINAL_ANSWER\n"
-                    "- Include EVIDENCE_TABLE JSON for count questions when verified\n"
-                ),
-            })
+            {"role": "user", "content": planner_finalize_plan_prompt(question, self.plan.format(), output_format)})
         result = self.llm.chat_to_llm(self.history)
+        self.plan.set_plan_result(result)
         plan_report_event_manager.publish("plan_result", self.plan)
-        return result
+        return f"""
+Task:
+{question}
+
+Plan Status:
+{self.plan.format()}
+
+Summary:
+{result}
+"""

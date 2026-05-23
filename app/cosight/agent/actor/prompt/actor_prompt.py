@@ -24,7 +24,6 @@ from app.cosight.agent.contest_mode import (
     contest_execute_task_append,
     is_contest_mode,
 )
-from app.cosight.research.deep_research_prompts import deep_research_actor_append
 
 # Add path to import llm.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
@@ -33,8 +32,7 @@ from config.config import get_turbo_mode
 
 
 def _contest_append(text: str, suffix: str) -> str:
-    text = text + suffix if is_contest_mode() else text
-    return text + deep_research_actor_append()
+    return text + suffix if is_contest_mode() else text
 
 def actor_system_prompt(work_space_path: str):
     # 检查是否启用急速模式

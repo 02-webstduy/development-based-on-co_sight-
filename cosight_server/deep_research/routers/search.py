@@ -36,33 +36,6 @@ from CoSight import CoSight
 
 searchRouter = APIRouter()
 
-
-def _parse_deep_research_enabled(params: dict) -> bool:
-    if not isinstance(params, dict):
-        return False
-    if params.get("deepResearchEnabled") in (True, "true", "1", 1):
-        return True
-    cp = params.get("contentProperties")
-    if isinstance(cp, str) and cp.strip():
-        try:
-            obj = json.loads(cp)
-            if isinstance(obj, dict) and obj.get("deepResearchEnabled"):
-                return True
-        except json.JSONDecodeError:
-            pass
-    return False
-
-
-def _status_text_for_run(run_status: str, progress=None) -> str:
-    total = (progress or {}).get("total", 0)
-    if run_status == "failed" or (total == 0 and run_status != "success"):
-        return "执行失败"
-    if run_status == "partial":
-        return "部分完成（证据不足）"
-    if run_status == "success":
-        return "执行完成"
-    return "执行完成"
-
 # 使用从环境变量获取的WORKSPACE_PATH（任务工作区根目录）
 work_space_path = os.environ.get('WORKSPACE_PATH')
 work_space_path = os.path.join(work_space_path, "work_space") if work_space_path else os.path.join(os.getcwd(), "work_space")
@@ -277,12 +250,8 @@ async def append_create_plan(data: Any):
                 "progress": data.get_progress() if hasattr(data, 'get_progress') and callable(
                     data.get_progress) else {},
                 "result": data.get_plan_result() if hasattr(data, 'get_plan_result') and callable(
-                    data.get_plan_result) else "",
-                "run_status": getattr(data, "run_status", "running"),
-                "evidence_table": getattr(data, "evidence_table", {}),
+                    data.get_plan_result) else ""
             }
-            rs = plan_dict.get("run_status", "running")
-            plan_dict["statusText"] = _status_text_for_run(rs, plan_dict.get("progress"))
             logger.info(f"step_files:{data.step_files}")
 
             # logger.info(f"Plan对象已转换为字典: {plan_dict}")
@@ -423,12 +392,6 @@ async def search(request: Request, params: Any = Body(None)):
     if result := validate_search_input(params):
         return result
 
-    if _parse_deep_research_enabled(params if isinstance(params, dict) else {}):
-        os.environ["DEEP_RESEARCH_ENABLED"] = "true"
-        logger.info("Deep research guardrails enabled for this session")
-    else:
-        os.environ.pop("DEEP_RESEARCH_ENABLED", None)
-
     # 是否为回放请求（由 WebSocket 层透传）
     is_replay_request = False
     try:
@@ -548,9 +511,7 @@ async def search(request: Request, params: Any = Body(None)):
                         "progress": plan_obj.get_progress() if hasattr(plan_obj, 'get_progress') and callable(
                             data.get_progress) else {},
                         "result": plan_obj.get_plan_result() if hasattr(plan_obj, 'get_plan_result') and callable(
-                            plan_obj.get_plan_result) else "",
-                        "run_status": getattr(plan_obj, "run_status", "running"),
-                        "evidence_table": getattr(plan_obj, "evidence_table", {}),
+                            data.get_plan_result) else ""
                     }
                     logger.info(f"step_files:{plan_obj.step_files}")
 
@@ -641,10 +602,7 @@ async def search(request: Request, params: Any = Body(None)):
                 with open(plan_final_path, 'r', encoding='utf-8') as rf:
                     final_obj = json.load(rf)
                 final_obj = dict(final_obj)
-                final_obj["status_text"] = _status_text_for_run(
-                    final_obj.get("run_status", "failed"),
-                    final_obj.get("progress"),
-                )
+                final_obj["status_text"] = "执行完成"
                 yield {"plan": final_obj}
                 return
             # 若存在历史日志且不在运行，回放日志后结束
@@ -770,13 +728,7 @@ async def search(request: Request, params: Any = Body(None)):
                 if isinstance(data, dict) and "result" in data and data['result']:
                     latest_plan = data
                     completed_plan = dict(latest_plan)
-                    run_status = completed_plan.get("run_status") or (
-                        "failed" if "Unable to determine" in str(completed_plan.get("result", "")) else "success"
-                    )
-                    completed_plan["run_status"] = run_status
-                    completed_plan["statusText"] = _status_text_for_run(
-                        run_status, completed_plan.get("progress")
-                    )
+                    completed_plan["statusText"] = "执行完成"
                     yield {"plan": completed_plan}
                     if not final_answer_emitted:
                         final_answer_emitted = True
@@ -794,12 +746,8 @@ async def search(request: Request, params: Any = Body(None)):
                 # 更新最新plan数据（非工具事件）
                 latest_plan = data
                 running_plan = dict(latest_plan) if isinstance(latest_plan, dict) else latest_plan
-                if isinstance(running_plan, dict) and not running_plan.get("statusText"):
-                    rs = running_plan.get("run_status", "running")
-                    if rs in ("failed", "partial"):
-                        running_plan["statusText"] = _status_text_for_run(rs, running_plan.get("progress"))
-                    else:
-                        running_plan["statusText"] = "正在执行中"
+                if isinstance(running_plan, dict):
+                    running_plan["statusText"] = "正在执行中"
                 # 发送完整的plan（去重）
                 try:
                     import hashlib as _hashlib

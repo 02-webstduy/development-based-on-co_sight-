@@ -27,22 +27,22 @@ def create_plan_skill():
             id='8d7f9a2b-c6e3-4f8d-b1a2-3e4f5d6c7b8a',
             name='app.cosight.planner.plan_toolkit.PlanToolkit.create_plan',
             description_zh='创建一个包含标题、步骤和依赖关系的新计划',
-            description_en='Create a new plan with title, steps and dependencies. Required: title (string) and steps (non-empty array). Do not use query.',
+            description_en='Create a new plan with title, steps and dependencies',
             parameters={
                 "type": "object",
                 "properties": {
                     'title': {
                         'type': 'string',
-                        'description_zh': '计划的标题（必填）',
-                        'description_en': 'Title of the plan (required)'
+                        'description_zh': '计划的标题',
+                        'description_en': 'Title of the plan'
                     },
                     'steps': {
                         'type': 'array',
                         'items': {
                             'type': 'string'
                         },
-                        'description_zh': '计划的步骤列表（必填，至少 1 步）。每项可为字符串，或含 title/description/required_tools 的对象（运行时会规范化）',
-                        'description_en': 'Required non-empty step list. Each entry: string, or object {title, description, required_tools, success_criteria}',
+                        'description_zh': '计划的步骤列表',
+                        'description_en': 'List of steps for the plan'
                     },
                     'dependencies': {
                         'type': 'object',

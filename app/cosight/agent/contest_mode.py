@@ -67,8 +67,6 @@ Contest-mode replanning rules:
 
 def contest_finalize_append(output_format: str = "") -> str:
     from app.cosight.tool.answer_validator import contest_answer_guard_note
-    from app.cosight.research.deep_research_prompts import deep_research_finalize_append
-
     format_note = (
         "Respect the caller-provided output format exactly.\n"
         if output_format
@@ -82,14 +80,13 @@ def contest_finalize_append(output_format: str = "") -> str:
 - Do not bury the answer in a long report.
 - If the answer is a number, entity name, option, date, or short phrase, output it exactly and concisely.
 - Then provide a compact trajectory summary that mentions the decisive steps and tools used.
-- If evidence is insufficient after all applicable tools, state the best-supported answer briefly — avoid defaulting to "Unable to determine" (unless deep research mode is on; then use FINAL_ANSWER: Unable to determine per deep research rules below).
+- If evidence is insufficient after all applicable tools, state the best-supported answer briefly — avoid defaulting to "Unable to determine".
 
 Recommended format when no stricter output format is provided:
 FINAL_ANSWER: <exact answer>
 TRACE_SUMMARY: <2-5 concise bullets or sentences explaining the path>
 
 {contest_answer_guard_note()}
-{deep_research_finalize_append()}
 """
 
 

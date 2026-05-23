@@ -151,14 +151,6 @@ def _compact_contest_payload(tool_name: str, obj: Dict[str, Any]) -> Dict[str, A
 
 def _web_evidence_snippet(text: str, limit: int) -> str:
     stripped = text.strip()
-    # Compact tool-failure records from ResearchGuard
-    if stripped.startswith("{") and '"status": "failed"' in stripped:
-        try:
-            obj = json.loads(stripped)
-            if isinstance(obj, dict) and obj.get("status") == "failed":
-                return json.dumps(obj, ensure_ascii=False)
-        except json.JSONDecodeError:
-            pass
     if len(stripped) <= limit:
         return stripped
     return (

@@ -47,20 +47,6 @@ FUNCTION_ARG_MAPPING: Dict[str, Dict[str, Dict[str, List[str]]]] = {
         'aliases': {
             'file': ['file_path', 'filepath', 'path', 'save_path', 'output', 'output_path', 'file_path','file_name','filename'],
         }
-    },
-    'create_plan': {
-        'required': ['title', 'steps'],
-        'aliases': {
-            'title': ['plan_title', 'plan_name', 'name', 'task_title', 'plan'],
-            'steps': ['plan_steps', 'step_list', 'tasks', 'actions', 'step_descriptions'],
-        }
-    },
-    'update_plan': {
-        'required': [],
-        'aliases': {
-            'title': ['plan_title', 'plan_name', 'name', 'task_title', 'plan'],
-            'steps': ['plan_steps', 'step_list', 'tasks', 'actions', 'step_descriptions'],
-        }
-    },
+    }
 }
 
