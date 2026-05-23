@@ -152,9 +152,9 @@ def search_wiki_skill():
         'semantic_apis': ["api_search"],
         'function': SkillFunction(
             id='3c44f9ad-be5c-4e6c-a9d8-1426b23828a0',
-            name='app.cosight.search_toolkit.search_google',
-            description_zh='使用维基百科搜索工具搜索给定查询的信息',
-            description_en='Get search results using wiki search engine',
+            name='app.cosight.tool.search_toolkit.search_wiki',
+            description_zh='使用维基百科搜索工具搜索给定查询的信息（仅摘要，不含编辑历史）',
+            description_en='Get Wikipedia article summary only (no revision history)',
             parameters={
                 "type": "object",
                 "properties": {
@@ -168,6 +168,268 @@ def search_wiki_skill():
             }
         )
     }
+
+
+def _wikipedia_tool_skill(skill_name, display_zh, display_en, desc_zh, desc_en, properties, required):
+    return {
+        'skill_name': skill_name,
+        'skill_type': "function",
+        'display_name_zh': display_zh,
+        'display_name_en': display_en,
+        'description_zh': desc_zh,
+        'description_en': desc_en,
+        'semantic_apis': ["api_wikipedia"],
+        'function': SkillFunction(
+            id=f'wiki-{skill_name}',
+            name=f'app.cosight.tool.wikipedia_revision_toolkit.WikipediaRevisionToolkit',
+            description_zh=desc_zh,
+            description_en=desc_en,
+            parameters={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            }
+        )
+    }
+
+
+def wikipedia_revision_skills():
+    title_prop = {
+        "title": {
+            "type": "string",
+            "description_zh": "维基百科页面标题，如 ZTE 或 ZTE Corporation",
+            "description_en": "Wikipedia page title, e.g. ZTE or ZTE Corporation",
+        }
+    }
+    return [
+        _wikipedia_tool_skill(
+            "count_wikipedia_edits_in_year",
+            "维基编辑次数统计",
+            "Wikipedia edit count",
+            "统计某页面在指定日历年内的编辑次数（MediaWiki API，程序计数）",
+            "Count edits to a Wikipedia page in a calendar year via MediaWiki API",
+            {**title_prop, "year": {"type": "integer", "description_zh": "年份，如 2025", "description_en": "Year e.g. 2025"}},
+            ["title", "year"],
+        ),
+        _wikipedia_tool_skill(
+            "get_wikipedia_revisions",
+            "维基修订列表",
+            "Wikipedia revisions",
+            "获取页面在时间范围内的修订元数据列表",
+            "List revision metadata for a page in a time range",
+            {
+                **title_prop,
+                "start": {"type": "string", "description_en": "ISO start time e.g. 2025-01-01T00:00:00Z"},
+                "end": {"type": "string", "description_en": "ISO end time e.g. 2025-12-31T23:59:59Z"},
+            },
+            ["title", "start", "end"],
+        ),
+        _wikipedia_tool_skill(
+            "compute_wikipedia_reference_delta",
+            "维基引用数差值",
+            "Wikipedia reference delta",
+            "计算两年首个修订版本之间 reference 数量差值",
+            "Reference count delta between first revisions in two years",
+            {
+                **title_prop,
+                "year_a": {"type": "integer"},
+                "year_b": {"type": "integer"},
+            },
+            ["title", "year_a", "year_b"],
+        ),
+        _wikipedia_tool_skill(
+            "find_wikipedia_revision_by_size_delta",
+            "按字节增量找修订",
+            "Find revision by size delta",
+            "在指定年份找到相对父修订 size 增加恰好为 target_delta 的编辑",
+            "Find revision in year whose size increase equals target_delta",
+            {
+                **title_prop,
+                "year": {"type": "integer"},
+                "target_delta": {"type": "integer", "description_en": "Exact size increase in bytes"},
+            },
+            ["title", "year", "target_delta"],
+        ),
+        _wikipedia_tool_skill(
+            "extract_section_from_revision",
+            "提取历史版本章节",
+            "Extract section from revision",
+            "从指定 oldid 的维基文本中只提取一个章节（如 Subsidiaries）",
+            "Extract one wikitext section from a revision by revid",
+            {
+                "revid": {"type": "integer"},
+                "section_title": {"type": "string"},
+            },
+            ["revid", "section_title"],
+        ),
+        _wikipedia_tool_skill(
+            "count_references_for_revision",
+            "统计修订引用数",
+            "Count references in revision",
+            "程序统计某修订版本 wikitext 中 <ref> 数量",
+            "Programmatic <ref> count for a revision",
+            {"revid": {"type": "integer"}},
+            ["revid"],
+        ),
+        _wikipedia_tool_skill(
+            "get_wikipedia_revision_before_date",
+            "指定日期前的维基修订",
+            "Wikipedia revision before date",
+            "获取某页面在指定 ISO 时间之前的最新修订版本",
+            "Latest Wikipedia revision strictly before an ISO timestamp",
+            {
+                **title_prop,
+                "before": {
+                    "type": "string",
+                    "description_en": "ISO timestamp upper bound e.g. 2023-08-01T00:00:00Z",
+                },
+            },
+            ["title", "before"],
+        ),
+    ]
+
+
+def _contest_tool_skill(skill_name, display_zh, display_en, desc_zh, desc_en, properties, required, api_tag="api_contest"):
+    return {
+        'skill_name': skill_name,
+        'skill_type': "function",
+        'display_name_zh': display_zh,
+        'display_name_en': display_en,
+        'description_zh': desc_zh,
+        'description_en': desc_en,
+        'semantic_apis': [api_tag],
+        'function': SkillFunction(
+            id=f'contest-{skill_name}',
+            name=f'app.cosight.tool.contest_document_toolkit.ContestDocumentToolkit',
+            description_zh=desc_zh,
+            description_en=desc_en,
+            parameters={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            }
+        )
+    }
+
+
+def contest_document_skills():
+    return [
+        _contest_tool_skill(
+            "lookup_book_publication_year",
+            "图书出版年份查询",
+            "Book publication year lookup",
+            "通过 Open Library / Wikipedia 程序化查询图书首次出版年份",
+            "Programmatic book publication year via Open Library or Wikipedia",
+            {
+                "book_title": {
+                    "type": "string",
+                    "description_en": "Book title e.g. The Propitious Esculent",
+                }
+            },
+            ["book_title"],
+        ),
+        _contest_tool_skill(
+            "count_term_occurrences",
+            "文本词频计数",
+            "Count term occurrences",
+            "在文本中程序化统计指定词/年份出现次数",
+            "Programmatic occurrence count of a term in text",
+            {
+                "text": {"type": "string"},
+                "term": {"type": "string", "description_en": "Term or year to count"},
+                "case_sensitive": {"type": "boolean", "default": False},
+            },
+            ["text", "term"],
+        ),
+        _contest_tool_skill(
+            "extract_abstract_from_text",
+            "提取论文摘要",
+            "Extract paper abstract",
+            "从论文全文中用规则提取 Abstract / Antraste 章节",
+            "Extract abstract section from academic paper plain text",
+            {"text": {"type": "string"}},
+            ["text"],
+        ),
+        _contest_tool_skill(
+            "count_reference_year_in_paper_abstract",
+            "摘要中引用书年份计数",
+            "Count book year in paper abstract",
+            "Q4 管道：查参考书出版年 → 定位论文摘要 → 统计年份出现次数",
+            "Q4 pipeline: book year lookup, paper abstract extraction, year count",
+            {
+                "paper_title": {"type": "string", "description_en": "Paper title"},
+                "author": {"type": "string", "description_en": "Author name"},
+                "reference_book_title": {"type": "string", "description_en": "Referenced book title"},
+                "document_url": {
+                    "type": "string",
+                    "description_en": "Optional direct PDF/URL if already known",
+                    "default": "",
+                },
+            },
+            ["paper_title", "author", "reference_book_title"],
+        ),
+        _contest_tool_skill(
+            "search_book_page_for_text",
+            "图书页码检索",
+            "Search book page for text",
+            "Q10 管道：定位指定版次 PDF → 按关键词搜索页码",
+            "Q10 pipeline: find edition PDF and return page number for search phrases",
+            {
+                "book_title": {"type": "string", "description_en": "Book title e.g. Joy of Cooking"},
+                "edition_year": {"type": "integer", "description_en": "Edition year e.g. 1975"},
+                "search_phrases": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description_en": "Phrases that must all appear on the page, e.g. raccoon, stuffing",
+                },
+                "pdf_url": {
+                    "type": "string",
+                    "description_en": "Optional direct PDF URL",
+                    "default": "",
+                },
+            },
+            ["book_title", "edition_year", "search_phrases"],
+        ),
+    ]
+
+
+def rail_connection_skills():
+    return [
+        {
+            'skill_name': 'count_train_line_station_connections',
+            'skill_type': "function",
+            'display_name_zh': '铁路共站线路统计',
+            'display_name_en': 'Shared-station rail line count',
+            'description_zh': '统计某列车线路各站在指定历史日期与其他通勤/重轨线路的共站连接数（排除地铁/轻轨）',
+            'description_en': 'Count distinct commuter/heavy rail lines sharing stations with a train route at a historical date',
+            'semantic_apis': ["api_rail"],
+            'function': SkillFunction(
+                id='rail-count-connections',
+                name='app.cosight.tool.rail_connection_toolkit.RailConnectionToolkit',
+                description_zh='Q3 管道：维基历史版本解析站点 → 提取共站线路 → 过滤并计数',
+                description_en='Q3 pipeline: parse historical Wikipedia route/stations and count connecting rail lines',
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "train_page_title": {
+                            "type": "string",
+                            "description_en": "Wikipedia train page title e.g. Adirondack (train)",
+                        },
+                        "as_of_date": {
+                            "type": "string",
+                            "description_en": "Historical cutoff date YYYY-MM-DD e.g. 2023-07-31",
+                        },
+                        "exclude_self_line": {
+                            "type": "boolean",
+                            "description_en": "Exclude the query train line itself",
+                            "default": True,
+                        },
+                    },
+                    "required": ["train_page_title", "as_of_date"],
+                }
+            )
+        }
+    ]
 
 
 def search_image_skill():

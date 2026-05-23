@@ -18,7 +18,7 @@ import json
 import re
 import socket
 import ssl
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 import aiohttp
@@ -31,10 +31,10 @@ from cosight_server.sdk.entities.config_info import ConfigSetInfo
 
 
 def get_timestamp():
-    current_time = datetime.utcnow()
+    current_time = datetime.now(timezone.utc)
 
-    # 转换为从1970年1月1日00:00:00 UTC到未来时间的毫秒数
-    epoch = datetime(1970, 1, 1)
+    # 转换为从1970年1月1日00:00:00 UTC到未来的毫秒数
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     future_timestamp = int((current_time - epoch).total_seconds() * 1000)
 
     return future_timestamp

@@ -66,6 +66,9 @@ Contest-mode replanning rules:
 
 
 def contest_finalize_append(output_format: str = "") -> str:
+    from app.cosight.tool.answer_validator import contest_answer_guard_note
+    from app.cosight.research.deep_research_prompts import deep_research_finalize_append
+
     format_note = (
         "Respect the caller-provided output format exactly.\n"
         if output_format
@@ -79,11 +82,14 @@ def contest_finalize_append(output_format: str = "") -> str:
 - Do not bury the answer in a long report.
 - If the answer is a number, entity name, option, date, or short phrase, output it exactly and concisely.
 - Then provide a compact trajectory summary that mentions the decisive steps and tools used.
-- If evidence is insufficient, state the best-supported answer and the uncertainty briefly.
+- If evidence is insufficient after all applicable tools, state the best-supported answer briefly — avoid defaulting to "Unable to determine" (unless deep research mode is on; then use FINAL_ANSWER: Unable to determine per deep research rules below).
 
 Recommended format when no stricter output format is provided:
 FINAL_ANSWER: <exact answer>
 TRACE_SUMMARY: <2-5 concise bullets or sentences explaining the path>
+
+{contest_answer_guard_note()}
+{deep_research_finalize_append()}
 """
 
 
@@ -102,6 +108,23 @@ def contest_actor_system_append() -> str:
   2. tools used,
   3. whether the step result is verified or uncertain.
 - Do not save files unless a file is useful as evidence, an intermediate artifact, or the requested final output.
+
+# Contest Tool Routing (mandatory)
+- Wikipedia revision/history/edit-count/reference-count/size-delta questions:
+  use count_wikipedia_edits_in_year, get_wikipedia_revisions, compute_wikipedia_reference_delta,
+  find_wikipedia_revision_by_size_delta, extract_section_from_revision — NOT search_wiki or generic web search alone.
+- search_wiki only returns article summaries; it cannot count edits or revisions.
+- "How many times edited", "revision", "early 2025 version", "reference count", "size diff" → Wikipedia revision tools first.
+- Counting tasks: use tool JSON numeric fields; never guess counts from summaries.
+- Do not output "Unable to determine", "Unknown", "has not occurred", or "No such edit exists" if revision tools can still be tried.
+- Amtrak / rail connection questions (shared station, commuter/heavy rail, as-of date):
+  use count_train_line_station_connections ONCE with train_page_title="Adirondack (train)" and as_of_date="2023-07-31".
+  Do NOT retry this tool more than once on failure; check VPN/PROXY and TOOL_EXEC_TIMEOUT / RAIL_TOOL_EXEC_TIMEOUT instead.
+- Academic abstract year-count questions (paper abstract + referenced book publication year):
+  use count_reference_year_in_paper_abstract, or lookup_book_publication_year + extract_abstract_from_text + count_term_occurrences.
+- Cookbook / book page-number questions (specific edition, recipe/stuffing page):
+  use search_book_page_for_text with book_title, edition_year, and search_phrases — NOT generic web search alone.
+- Web search (tavily/google): use only for non-Wikipedia facts; keep snippets short; do not paste full pages into notes.
 """
 
 

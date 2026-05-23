@@ -28,6 +28,7 @@ from app.agent_dispatcher.infrastructure.entity.exception.error_code_consts impo
 from app.agent_dispatcher.infrastructure.entity.exception.ZaeFrameworkException import \
     NaeFrameworkException
 from app.common.logger_util import logger
+from app.common.runtime_context import resolve_stdio_command
 
 
 class MCPServer(abc.ABC):
@@ -197,8 +198,14 @@ class MCPServerStdio(_MCPServerWithClientSession):
     ]:
         """Create the streams for the server."""
         logger.info(f"{self.config}")
+        configured_command = self.config.get("command", "")
+        command = resolve_stdio_command(configured_command)
+        if command != configured_command:
+            logger.info(
+                f"MCP stdio command resolved: {configured_command!r} -> {command!r}"
+            )
         parameters = StdioServerParameters(
-            command=self.config["command"],
+            command=command,
             args=self.config.get("args", []),
             env=self.config.get("env"),
             cwd=self.config.get("cwd"),

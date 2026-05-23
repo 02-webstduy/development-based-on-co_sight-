@@ -39,6 +39,9 @@ from app.cosight.tool.deep_search.searchers.tavily_search import TavilySearch
 from app.cosight.tool.audio_toolkit import AudioTool
 from app.cosight.tool.video_analysis_toolkit import VideoTool
 from app.cosight.tool.html_visualization_toolkit import HtmlVisualizationToolkit
+from app.cosight.tool.wikipedia_revision_toolkit import WikipediaRevisionToolkit
+from app.cosight.tool.rail_connection_toolkit import RailConnectionToolkit
+from app.cosight.tool.contest_document_toolkit import ContestDocumentToolkit
 from config.config import get_tavily_config
 from app.common.logger_util import logger
 
@@ -94,22 +97,40 @@ class TaskActorAgent(BaseAgent):
         code_toolkit = CodeToolkit(sandbox="subprocess")
         tavily_search = TavilySearch()
         html_toolkit = HtmlVisualizationToolkit(workspace_path=work_space_path, tool_llm=tool_llm)
-        code_toolkit = CodeToolkit(sandbox="subprocess")
+        wiki_revision = WikipediaRevisionToolkit()
+        rail_toolkit = RailConnectionToolkit()
+        contest_doc = ContestDocumentToolkit()
         all_functions = {"mark_step": act_toolkit.mark_step,
-                         # "deep_search": deep_search_toolkit.deep_search,
-                        #  "search_baidu": search_baidu,
+                          "deep_search": deep_search_toolkit.deep_search,
+                         "search_baidu": search_baidu,
                          "search_google": search_toolkit.search_google,
                          "search_wiki": search_toolkit.search_wiki,
+                         "count_wikipedia_edits_in_year": wiki_revision.count_wikipedia_edits_in_year,
+                         "get_wikipedia_revisions": wiki_revision.get_revisions,
+                         "get_wikipedia_revision_content": wiki_revision.get_revision_content,
+                         "count_wikipedia_references": wiki_revision.count_wikipedia_references,
+                         "count_references_for_revision": wiki_revision.count_references_for_revision,
+                         "extract_wikipedia_section": wiki_revision.extract_wikipedia_section,
+                         "extract_section_from_revision": wiki_revision.extract_section_from_revision,
+                         "compute_wikipedia_reference_delta": wiki_revision.compute_wikipedia_reference_delta,
+                         "find_wikipedia_revision_by_size_delta": wiki_revision.find_wikipedia_revision_by_size_delta,
+                         "get_wikipedia_revision_before_date": wiki_revision.get_revision_before_date,
+                         "count_train_line_station_connections": rail_toolkit.count_train_line_station_connections,
+                         "lookup_book_publication_year": contest_doc.lookup_book_publication_year,
+                         "count_term_occurrences": contest_doc.count_term_occurrences,
+                         "extract_abstract_from_text": contest_doc.extract_abstract_from_text,
+                         "count_reference_year_in_paper_abstract": contest_doc.count_reference_year_in_paper_abstract,
+                         "search_book_page_for_text": contest_doc.search_book_page_for_text,
                          "tavily_search": search_toolkit.tavily_search,
-                        #  "image_search": tavily_search.search,
+                        "image_search": tavily_search.search,
                          "audio_recognition": audio_toolkit.speech_to_text,
-                         # "search_duckgo": search_toolkit.search_duckduckgo,
+                          "search_duckgo": search_toolkit.search_duckduckgo,
                          "execute_code": code_toolkit.execute_code,
                          "file_saver": file_toolkit.file_saver,
                          "file_read": file_toolkit.file_read,
                          "file_str_replace": file_toolkit.file_str_replace,
                          "file_find_in_content": file_toolkit.file_find_in_content,
-                        #  "browser_use": web_toolkit.browser_use,
+                        "browser_use": web_toolkit.browser_use,
                          "ask_question_about_image": image_toolkit.ask_question_about_image,
                          "ask_question_about_video": video_toolkit.ask_question_about_video,
                          "fetch_website_content": fetch_website_content,

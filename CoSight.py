@@ -29,6 +29,7 @@ from app.cosight.task.task_manager import TaskManager
 from app.cosight.task.todolist import Plan
 from app.cosight.task.time_record_util import time_record
 from app.common.logger_util import logger
+from app.cosight.research.research_guard import ResearchGuard, is_deep_research_enabled
 
 
 class CoSight:
@@ -37,14 +38,12 @@ class CoSight:
         self.plan_id = message_uuid if message_uuid else f"plan_{int(time.time())}"
         self.plan = Plan()
         TaskManager.set_plan(self.plan_id, self.plan)
+        self.research_guard = None
         
         # 设置Langfuse追踪上下文
-        # 使用plan_id作为session_id，让整个任务的所有traces都关联在一起
-        # trace_id会自动生成，每个Agent调用都是独立的trace
-        # 这样在Langfuse中可以看到完整的session replay
         plan_llm.set_trace_context(
-            trace_id=None,  # 不指定trace_id，让每次调用自动生成
-            session_id=self.plan_id,  # 使用plan_id作为session_id
+            trace_id=None,
+            session_id=self.plan_id,
             tags=["planning"],
             metadata={"agent_type": "planner", "plan_id": self.plan_id}
         )
@@ -69,87 +68,222 @@ class CoSight:
         
         self.task_planner_agent = TaskPlannerAgent(create_planner_instance("task_planner_agent"), plan_llm,
                                                    self.plan_id)
-        self.act_llm = act_llm  # Store llm for later use
+        self.act_llm = act_llm
         self.tool_llm = tool_llm
         self.vision_llm = vision_llm
 
+    def _init_guard(self, question: str) -> ResearchGuard:
+        self.research_guard = ResearchGuard(self.plan, question)
+        self.research_guard.attach_to_plan()
+        return self.research_guard
+
+    def _create_plan_with_validation(self, question: str, output_format: str, guard: ResearchGuard) -> bool:
+        """Return True if a non-empty plan exists after retries."""
+        create_task = question
+        max_attempts = 2 if guard.enabled else 3
+        for attempt in range(max_attempts):
+            guard.record_plan_attempt()
+            self.task_planner_agent.create_plan(create_task, output_format)
+            if not guard.is_empty_plan():
+                return True
+            logger.warning(f"InvalidPlan: empty steps (attempt {attempt + 1}/{max_attempts})")
+            create_task = (
+                f"{question}\n\n"
+                "InvalidPlan: you MUST call create_plan with at least 2 executable steps "
+                "that use retrieval/API tools. Empty plans are rejected."
+            )
+        return not guard.is_empty_plan()
+
+    def _guard_limits_stop(self, guard: ResearchGuard) -> bool:
+        exceeded, reason = guard.limits_exceeded()
+        if exceeded:
+            guard.run_status = "failed"
+            guard.terminate_reason = reason
+            logger.warning(f"ResearchGuard stopped execution: {reason}")
+            return True
+        return False
+
     @time_record
     def execute(self, question, output_format=""):
-        # 更新所有LLM的metadata，添加任务信息
+        guard = self._init_guard(question)
+
         task_metadata = {
             "task_question": question[:200] if len(question) > 200 else question,
-            "plan_id": self.plan_id
+            "plan_id": self.plan_id,
+            "deep_research_enabled": guard.enabled,
         }
         
         for llm in [self.task_planner_agent.llm, self.act_llm, self.tool_llm, self.vision_llm]:
             if hasattr(llm, 'current_metadata'):
                 llm.current_metadata.update(task_metadata)
-        
-        create_task = question
-        retry_count = 0
-        while not self.plan.get_ready_steps() and retry_count < 3:
-            create_result = self.task_planner_agent.create_plan(create_task, output_format)
-            create_task += f"\nThe plan creation result is: {create_result}\nCreation failed, please carefully review the plan creation rules and select the create_plan tool to create the plan"
-            retry_count += 1
-        
-        # 使用持续监控的方式，而不是等待所有步骤完成
-        active_threads = {}  # 存储活跃的线程 {step_index: thread}
-        
+
+        # A. Empty plan validation (deep research)
+        if not self._create_plan_with_validation(question, output_format, guard):
+            result = guard.build_unable_to_determine(
+                "Planner failed to generate executable research steps."
+            )
+            self.plan.set_plan_result(result)
+            self._set_run_status(guard)
+            return self._format_result(question, result, guard)
+
+        active_threads = {}
+
         while True:
-            # 检查是否有新的可执行步骤
+            if self._guard_limits_stop(guard):
+                break
+
             ready_steps = self.plan.get_ready_steps()
             
-            # 启动新的可执行步骤
             for step_index in ready_steps:
                 if step_index not in active_threads:
+                    if guard.enabled:
+                        guard.increment_research_step()
+                        if self._guard_limits_stop(guard):
+                            break
                     logger.info(f"Starting new step {step_index}")
-                    thread = Thread(target=self._execute_single_step, args=(question, step_index))
+                    thread = Thread(target=self._execute_single_step, args=(question, step_index, guard))
                     thread.daemon = True
                     thread.start()
                     active_threads[step_index] = thread
             
-            # 检查已完成的线程
             completed_steps = []
-            for step_index, thread in active_threads.items():
+            for step_index, thread in list(active_threads.items()):
                 if not thread.is_alive():
                     completed_steps.append(step_index)
             
-            # 移除已完成的线程
             for step_index in completed_steps:
                 del active_threads[step_index]
                 logger.info(f"Step {step_index} completed and thread removed")
             
-            # 如果没有活跃线程且没有可执行步骤，则退出
             if not active_threads and not ready_steps:
                 logger.info("No more ready steps to execute and no active threads")
                 break
             
-            # 短暂休眠，避免CPU占用过高
-            import time
+            if self._guard_limits_stop(guard):
+                break
+            
             time.sleep(0.1)
-        
-        return self.task_planner_agent.finalize_plan(question, output_format)
 
-    def _execute_single_step(self, question, step_index):
-        """执行单个步骤"""
+        # B. Mandatory tool evidence before finalize
+        if guard.enabled and guard.requires_external_evidence():
+            guard.sync_from_plan()
+            if not guard.has_successful_retrieval():
+                if not guard.evidence_retry_attempted:
+                    guard.evidence_retry_attempted = True
+                    logger.warning("No retrieval tools succeeded; running one evidence enforcement step")
+                    self._run_evidence_enforcement_step(question, guard)
+                    guard.sync_from_plan()
+
+        if guard.enabled and guard.requires_external_evidence() and not guard.has_successful_retrieval():
+            result = guard.build_unable_to_determine(
+                "No successful retrieval/API tool calls; cannot produce verified FINAL_ANSWER."
+            )
+            self.plan.set_plan_result(result)
+            self._set_run_status(guard)
+            return self._format_result(question, result, guard)
+
+        if guard.enabled and guard.terminate_reason and guard.run_status == "failed":
+            result = guard.build_partial_report(
+                guard.terminate_reason,
+                "Research terminated by circuit breaker before finalize.",
+            )
+            self.plan.set_plan_result(result)
+            self._set_run_status(guard)
+            return self._format_result(question, result, guard)
+
+        raw_finalize = self.task_planner_agent.finalize_plan(question, output_format, guard)
+        result = guard.validate_finalize_output(raw_finalize)
+        self.plan.set_plan_result(result)
+        self._set_run_status(guard)
+        plan_report_event_manager.publish("plan_result", self.plan)
+        return self._format_result(question, result, guard)
+
+    def _set_run_status(self, guard: ResearchGuard) -> None:
+        self.plan.run_status = guard.run_status  # type: ignore[attr-defined]
+        self.plan.evidence_table = guard.evidence_table  # type: ignore[attr-defined]
+        guard.attach_to_plan()
+
+    def _format_result(self, question: str, result: str, guard: ResearchGuard) -> str:
+        status_line = guard.run_status
+        if status_line == "failed":
+            status_text = "执行失败"
+        elif status_line == "partial":
+            status_text = "部分完成（证据不足）"
+        elif guard.is_empty_plan():
+            status_text = "执行失败"
+        else:
+            status_text = "执行完成" if guard.has_verified_evidence() or not guard.requires_external_evidence() else "部分完成（证据不足）"
+
+        return f"""
+Task:
+{question}
+
+Plan Status:
+{self.plan.format()}
+
+Run Status: {status_line} ({status_text})
+
+Summary:
+{result}
+"""
+
+    def _run_evidence_enforcement_step(self, question: str, guard: ResearchGuard) -> None:
+        """One extra step forcing tool use when plan completed without retrieval."""
+        if guard.is_empty_plan():
+            return
+        step_index = 0
+        try:
+            self.plan.mark_step(step_index, step_status="in_progress")
+            plan_report_event_manager.publish("plan_process", self.plan)
+            task_actor_agent = TaskActorAgent(
+                create_actor_instance("actor_evidence_retry", self.work_space_path),
+                self.act_llm,
+                self.vision_llm,
+                self.tool_llm,
+                self.plan_id,
+                work_space_path=self.work_space_path,
+            )
+            task_actor_agent.history.append({
+                "role": "user",
+                "content": guard.evidence_retry_prompt() + f"\n\nTask: {question}",
+            })
+            task_actor_agent.act(question=question, step_index=step_index)
+            self.plan.mark_step(step_index, step_status="completed", step_notes="evidence enforcement pass")
+            plan_report_event_manager.publish("plan_process", self.plan)
+        except Exception as e:
+            logger.error(f"Evidence enforcement step failed: {e}", exc_info=True)
+            try:
+                self.plan.mark_step(step_index, step_status="blocked", step_notes=str(e))
+            except Exception:
+                pass
+
+    def _execute_single_step(self, question, step_index, guard: ResearchGuard):
         try:
             logger.info(f"Starting execution of step {step_index}")
-            # 每个线程创建独立的TaskActorAgent实例
             task_actor_agent = TaskActorAgent(
                 create_actor_instance(f"actor_for_step_{step_index}", self.work_space_path),
                 self.act_llm,
                 self.vision_llm,
                 self.tool_llm,
                 self.plan_id,
-                work_space_path=self.work_space_path
+                work_space_path=self.work_space_path,
             )
+            if guard.enabled and guard.requires_external_evidence():
+                task_actor_agent.history.append({
+                    "role": "user",
+                    "content": (
+                        "Deep research mode: use retrieval/API tools for facts and counts. "
+                        "Do not answer from internal knowledge alone. "
+                        + guard.compressed_context_block()[:2000]
+                    ),
+                })
             result = task_actor_agent.act(question=question, step_index=step_index)
             logger.info(f"Completed execution of step {step_index} with result: {result}")
         except Exception as e:
             logger.error(f"Error executing step {step_index}: {e}", exc_info=True)
 
     def execute_steps(self, question, ready_steps):
-        from threading import Thread, Semaphore
+        from threading import Semaphore
         from queue import Queue
 
         results = {}
@@ -160,14 +294,13 @@ class CoSight:
             semaphore.acquire()
             try:
                 logger.info(f"Starting execution of step {step_index}")
-                # 每个线程创建独立的TaskActorAgent实例
                 task_actor_agent = TaskActorAgent(
                     create_actor_instance(f"actor_for_step_{step_index}", self.work_space_path),
                     self.act_llm,
                     self.vision_llm,
                     self.tool_llm,
                     self.plan_id,
-                    work_space_path=self.work_space_path
+                    work_space_path=self.work_space_path,
                 )
                 result = task_actor_agent.act(question=question, step_index=step_index)
                 logger.info(f"Completed execution of step {step_index} with result: {result}")
@@ -175,18 +308,15 @@ class CoSight:
             finally:
                 semaphore.release()
 
-        # 为每个ready_step创建并执行线程
         threads = []
         for step_index in ready_steps:
             thread = Thread(target=execute_step, args=(step_index,))
             thread.start()
             threads.append(thread)
 
-        # 等待所有线程完成
         for thread in threads:
             thread.join()
 
-        # 收集结果
         while not result_queue.empty():
             step_index, result = result_queue.get()
             results[step_index] = result
@@ -195,17 +325,12 @@ class CoSight:
 
 
 if __name__ == '__main__':
-    # 配置工作区
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    # 获取当前时间并格式化
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    # 构造路径：/xxx/xxx/work_space/work_space_时间戳
     work_space_path = os.path.join(BASE_DIR, 'work_space', f'work_space_{timestamp}')
     os.makedirs(work_space_path, exist_ok=True)
 
-    # 配置CoSight
     cosight = CoSight(llm_for_plan, llm_for_act, llm_for_tool, llm_for_vision, work_space_path)
 
-    # 运行CoSight
     result = cosight.execute("帮我写一篇中兴通讯的分析报告")
     logger.info(f"final result is {result}")

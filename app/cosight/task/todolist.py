@@ -47,6 +47,9 @@ class Plan:
         else:
             self.dependencies = {i: [i - 1] for i in range(1, len(self.steps))} if len(self.steps) > 1 else {}
         self.result = ""
+        self.run_status = "running"
+        self.evidence_table: Dict = {}
+        self.research_guard = None
         self.work_space_path = work_space_path if work_space_path else os.environ.get("WORKSPACE_PATH") or os.getcwd()
 
     def set_plan_result(self, plan_result):
@@ -103,6 +106,8 @@ class Plan:
             "steps": steps_payload,
             "global_tool_calls": global_tools,
             "final_answer": self._short_text(self.result, 8000),
+            "run_status": getattr(self, "run_status", "running"),
+            "evidence_table": getattr(self, "evidence_table", {}),
         }
 
     def export_competition_trace(self) -> None:

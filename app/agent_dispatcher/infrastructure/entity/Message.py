@@ -30,7 +30,7 @@ class Message(BaseModel):
     def __init__(self, content: str, role: str | None = None, data: dict | None = None, create_time: int = None,
                  type: str = TYPE_REQUEST, **kdata):
         local = locals()
-        fields = self.model_fields
+        fields = self.__class__.model_fields
         args_data = dict((k, fields.get(k).default if v is None else v) for k, v in local.items() if k in fields)
         kdata.update(args_data)
         super().__init__(**kdata)

@@ -66,6 +66,9 @@ def create_actor_template(template_name, work_space_path):
                    fetch_website_images_only_skill(),
                    # search_duckgo_skill(),
                    search_wiki_skill(),
+                   *wikipedia_revision_skills(),
+                   *rail_connection_skills(),
+                   *contest_document_skills(),
                    audio_recognition_skill(),
                    ask_question_about_video_skill()],
         # , terminate_skill(), browser_use_skill()

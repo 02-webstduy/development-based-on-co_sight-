@@ -15,9 +15,10 @@
 
 import inspect
 import json
+import os
 import sys
 import time
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -32,6 +33,7 @@ from app.common.logger_util import logger
 from app.common.http_timeout import get_tool_exec_timeout, tool_timeout_message
 from app.cosight.agent.base.tool_arg_mapping import FUNCTION_ARG_MAPPING
 from config.config import get_turbo_mode
+from app.cosight.research.research_guard import is_deep_research_enabled, MAX_TOTAL_ITERATIONS
 
 
 class BaseAgent:
@@ -54,13 +56,15 @@ class BaseAgent:
             self.plan = None  # Will be set by subclasses that have access to Plan
 
     def _truncate_tool_result_for_context(self, tool_name: str, tool_result: str) -> str:
+        from app.cosight.tool.evidence_reducer import reduce_tool_result
+
         raw_text = "" if tool_result is None else str(tool_result)
         cleaned_text = raw_text.replace("\x00", "")
+        truncated_text = reduce_tool_result(tool_name, cleaned_text)
         limit = getattr(self.llm, "max_tool_content_length", 50000)
-        truncated_text = cleaned_text
-        if limit and len(cleaned_text) > limit:
+        if limit and len(truncated_text) > limit:
             truncated_text = (
-                cleaned_text[:limit]
+                truncated_text[:limit]
                 + f"\n\n[tool result truncated: original_length={len(raw_text)}, "
                 + f"cleaned_length={len(cleaned_text)}, limit={limit}]"
             )
@@ -71,13 +75,47 @@ class BaseAgent:
         return truncated_text
 
     def _format_tool_error_for_context(self, tool_name: str, error: Exception | str) -> str:
-        error_text = str(error)
+        import json
+
+        if isinstance(error, Exception):
+            error_type = type(error).__name__
+            exception_message = str(error)
+        else:
+            exception_message = str(error)
+            error_type = "Error"
+            if "TypeError:" in exception_message:
+                error_type = "TypeError"
+            elif "Timeout" in exception_message:
+                error_type = "Timeout"
+            elif "JSONDecodeError" in exception_message:
+                error_type = "JSONDecodeError"
+
+        guard = self._get_research_guard()
+        if guard and guard.enabled:
+            record = {
+                "tool": tool_name,
+                "status": "failed",
+                "error_type": error_type,
+                "exception_message": exception_message[:800],
+            }
+            return json.dumps(record, ensure_ascii=False)
+
+        error_text = exception_message
         short_error = error_text[:500] + ("..." if len(error_text) > 500 else "")
         return (
             f"Tool `{tool_name}` failed: {type(error).__name__ if isinstance(error, Exception) else 'Error'}: "
             f"{short_error}\n"
             "Do not treat this as evidence. Try an alternative tool, query, data source, or a direct calculation path before finalizing."
         )
+
+    def _prepare_create_plan_args(
+        self, norm_args: Dict[str, Any], raw_args: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
+        from app.cosight.tool.plan_toolkit import merge_create_plan_tool_args
+
+        merged = merge_create_plan_tool_args(norm_args, raw_args)
+        err = merged.pop("_plan_tool_error", None)
+        return merged, err
 
     def _normalize_tool_args(self, function_to_call, raw_args: Dict[str, Any], function_name: str = "") -> Dict[str, Any]:
         """
@@ -290,6 +328,20 @@ class BaseAgent:
             "search_google": "谷歌搜索", 
             "tavily_search": "Tavily搜索",
             "search_wiki": "维基百科搜索",
+            "count_wikipedia_edits_in_year": "维基年度编辑次数",
+            "get_wikipedia_revisions": "维基修订列表",
+            "get_wikipedia_revision_content": "维基修订正文",
+            "compute_wikipedia_reference_delta": "维基引用数差值",
+            "find_wikipedia_revision_by_size_delta": "维基字节增量修订",
+            "extract_section_from_revision": "维基章节提取",
+            "count_references_for_revision": "维基修订引用计数",
+            "get_wikipedia_revision_before_date": "维基历史修订",
+            "count_train_line_station_connections": "铁路共站线路统计",
+            "lookup_book_publication_year": "图书出版年份",
+            "count_term_occurrences": "文本词频计数",
+            "extract_abstract_from_text": "论文摘要提取",
+            "count_reference_year_in_paper_abstract": "摘要年份计数",
+            "search_book_page_for_text": "图书页码检索",
             "image_search": "图片搜索",
             "audio_recognition": "音频识别",
             
@@ -408,14 +460,32 @@ class BaseAgent:
         # 未在清单中的工具：不返回任何步骤
         return []
 
+    def _get_research_guard(self):
+        if self.plan is None:
+            return getattr(self, "research_guard", None)
+        return getattr(self.plan, "research_guard", None)
+
     def execute(self, messages: List[Dict[str, Any]], step_index=None, max_iteration=10):  #调试修改的10
         # 急速模式：减少迭代次数
         turbo_mode = get_turbo_mode()
         if turbo_mode:
             max_iteration = min(max_iteration, 5)  # 急速模式下最多5次迭代
             logger.info(f"Turbo mode enabled: max_iteration reduced to {max_iteration}")
+        if is_deep_research_enabled():
+            max_iteration = min(max_iteration, MAX_TOTAL_ITERATIONS)
+
+        guard = self._get_research_guard()
         
         for i in range(max_iteration):
+            if guard:
+                guard.record_iteration_tokens(messages)
+                exceeded, reason = guard.limits_exceeded()
+                if exceeded:
+                    messages.append({
+                        "role": "user",
+                        "content": guard._circuit_stop_message(reason),
+                    })
+                    return guard.build_partial_report(reason)
             # 为了避免日志过大，这里不再打印完整 messages，只记录关键元信息
             logger.info(f"act agent call with tools start: iter={i}, step_index={step_index}, "
                         f"msg_count={len(messages)}, tools_count={len(self.tools)}")
@@ -466,6 +536,14 @@ class BaseAgent:
     def _execute_tool_calls(self, tool_calls, step_index):
         results = []
         tool_timeout = get_tool_exec_timeout()
+        if any(
+            tc.function.name == "count_train_line_station_connections"
+            for tc in tool_calls
+        ):
+            # Batched Wikipedia lookups for ~16 stations; default 60s is too low.
+            tool_timeout = max(tool_timeout, float(
+                os.environ.get("RAIL_TOOL_EXEC_TIMEOUT", "180")
+            ))
         with ThreadPoolExecutor() as executor:
             pending: List[Tuple] = []
             for tool_call in tool_calls:
@@ -497,6 +575,7 @@ class BaseAgent:
                         f"Tool execution timed out after {tool_timeout}s: {function_name}",
                         exc_info=True,
                     )
+                    timeout_msg = tool_timeout_message(function_name, tool_timeout)
                     self._push_tool_event(
                         "tool_error",
                         function_name,
@@ -504,16 +583,21 @@ class BaseAgent:
                         "",
                         step_index,
                         tool_timeout,
-                        tool_timeout_message(function_name, tool_timeout),
+                        timeout_msg,
                     )
+                    err_content = self._format_tool_error_for_context(function_name, timeout_msg)
+                    guard = self._get_research_guard()
+                    if guard and guard.enabled:
+                        stop_msg = guard.record_tool_outcome(
+                            function_name, "", err_content, success=False, error_text="Timeout"
+                        )
+                        if stop_msg:
+                            err_content = stop_msg
                     results.append({
                         "role": "tool",
                         "name": function_name,
                         "tool_call_id": tool_call_id,
-                        "content": self._format_tool_error_for_context(
-                            function_name,
-                            tool_timeout_message(function_name, tool_timeout),
-                        ),
+                        "content": err_content,
                     })
                 except Exception as e:
                     logger.error(f"Unhandled exception: {e}", exc_info=True)
@@ -539,6 +623,23 @@ class BaseAgent:
     @time_record
     def _execute_tool_call(self, function_name="", function_args="", tool_call_id="", step_index=None):
         start_time = time.time()
+        guard = self._get_research_guard()
+
+        if guard and guard.is_tool_blocked(function_name):
+            import json
+            blocked = {
+                "tool": function_name,
+                "status": "failed",
+                "error_type": "CircuitBreakerOpen",
+                "message": f"Tool blocked after {guard.per_tool_failures.get(function_name, 0)} failures",
+            }
+            self._push_tool_event("tool_error", function_name, function_args, "", step_index, 0, str(blocked))
+            return {
+                "role": "tool",
+                "name": function_name,
+                "tool_call_id": tool_call_id,
+                "content": json.dumps(blocked, ensure_ascii=False),
+            }
         
         # 推送工具开始执行事件
         self._push_tool_event("tool_start", function_name, function_args, step_index=step_index)
@@ -594,12 +695,38 @@ class BaseAgent:
                     asyncio.set_event_loop(loop)
                     # 归一化参数键（含函数名定制映射）
                     norm_args = self._normalize_tool_args(function_to_call, args_dict, function_name)
+                    if function_name == "create_plan":
+                        norm_args, plan_err = self._prepare_create_plan_args(norm_args, args_dict)
+                        if plan_err:
+                            duration = time.time() - start_time
+                            self._push_tool_event(
+                                "tool_error", function_name, function_args, "", step_index, duration, plan_err
+                            )
+                            return {
+                                "role": "tool",
+                                "name": function_name,
+                                "tool_call_id": tool_call_id,
+                                "content": plan_err,
+                            }
                     result = loop.run_until_complete(function_to_call(**norm_args))
                 finally:
                     loop.close()
             else:
                 # 同步函数直接调用
                 norm_args = self._normalize_tool_args(function_to_call, args_dict, function_name)
+                if function_name == "create_plan":
+                    norm_args, plan_err = self._prepare_create_plan_args(norm_args, args_dict)
+                    if plan_err:
+                        duration = time.time() - start_time
+                        self._push_tool_event(
+                            "tool_error", function_name, function_args, "", step_index, duration, plan_err
+                        )
+                        return {
+                            "role": "tool",
+                            "name": function_name,
+                            "tool_call_id": tool_call_id,
+                            "content": plan_err,
+                        }
                 result = function_to_call(**norm_args)
 
             # 计算执行时间
@@ -618,6 +745,13 @@ class BaseAgent:
 
             context_result = self._truncate_tool_result_for_context(function_name, str(result))
 
+            if guard and guard.enabled:
+                stop_msg = guard.record_tool_outcome(
+                    function_name, function_args, str(result), success=True
+                )
+                if stop_msg:
+                    context_result = stop_msg
+
             return {
                 "role": "tool",
                 "name": function_name,
@@ -633,11 +767,18 @@ class BaseAgent:
                                 "", step_index, duration, error_msg)
             
             logger.error(f"Unhandled exception: {e}", exc_info=True)
+            err_content = self._format_tool_error_for_context(function_name, e)
+            if guard and guard.enabled:
+                stop_msg = guard.record_tool_outcome(
+                    function_name, function_args, err_content, success=False, error_text=error_msg
+                )
+                if stop_msg:
+                    err_content = stop_msg
             return {
                 "role": "tool",
                 "name": function_name,
                 "tool_call_id": tool_call_id,
-                "content": self._format_tool_error_for_context(function_name, e)
+                "content": err_content
             }
 
     def _filter_mcp_tool_args(self, function_name: str, args_dict: Dict[str, Any]) -> Dict[str, Any]:
