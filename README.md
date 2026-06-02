@@ -1,149 +1,137 @@
+# Co-Sight Competition Edition
 
-## 🚀 Still worried about the invitation code? One-click deployment of Co-Sight to quickly build your own Manus-like system!
+基于 Co-Sight 的竞赛增强版本，针对复杂检索、多步推理和事实验证类任务进行了优化，在不修改原有 Agent 工作流的前提下，通过新增竞赛模式提升答案准确率、执行稳定性和推理质量。
 
-[![简体中文](https://img.shields.io/badge/简体中文-点击查看-orange)](README-zh.md)
-[![arXiv](https://img.shields.io/badge/arXiv-2510.21557-b31b1b)](https://arxiv.org/abs/2510.21557)
+## ✨ 特性
 
-Since the release of Manus, some closed-source platforms have faced problems such as high cost, limited access, and difficulty in privatization deployment, although they have excellent user experience and commercial support. Although open source frameworks have higher flexibility and transparency, they are slightly lacking in terms of functional integrity, style richness, and stability.
+- 竞赛模式开关（Mode Switch）
+- 竞赛专用 Prompt 工程
+- 工具超时保护机制
+- 工具错误压缩与容错
+- 长上下文管理策略
+- Final Answer 自动捕获
+- Wikipedia 专项工具集
+- 检索结果清洗与优化
 
-**Co-Sight** Committed to striking the best balance between cost, quality, stability and ease of use. It supports low-cost large models to generate high-quality and beautiful reports comparable to Claude models, and can be flexibly deployed in private environments, helping enterprises and individuals quickly build their own Manus-like systems.
+---
 
-## 🔍Sample Demo
+## 🚀 设计理念
 
-| Scene                 | Example links                                                                 | Preview of the effect                           |
-|-----------------------|-------------------------------------------------------------------------------|-------------------------------------------------|
-| **Industry Research** | [ZTE analysis report](https://www.youtube.com/watch?v=SNd8kYPxr3s)                       | ![](assets/Pasted_image_20250501015026.png)     |
-| **Personal life**     | [2025 May Day Shanghai Travel Guide](https://www.youtube.com/watch?v=IkAGq0e1Lio&feature=youtu.be) | <br>![](assets/Pasted_image_20250501015117.png) |
-| **Hot news**              | [Analysis of the Global Impact of Trump's Tariff Policy](https://www.youtube.com/watch?v=19-BmlHuG_E)                  | ![](assets/Pasted_image_20250501015617.png)     |
-| **...**               |                                                                               |                                                 |
+本项目遵循：
 
-**We welcome you to contribute more examples in the Lab to enrich our case library!**  
+> 不修改原有流程，只增加竞赛能力。
 
-GitHub Address：[https://github.com/Co-Sight-Series/Co-Sight-Lab](https://github.com/Co-Sight-Series/Co-Sight-Lab)
+所有竞赛相关优化均通过独立模块实现，通过模式开关启用，避免对原有框架进行侵入式修改。
 
-## 🛠Installation Guide
+核心目标：
 
-1. **Download the project**：You can choose one of the following methods to download the project to your local computer：
-   
-   **1. Use Git clone**
-   Visit https://github.com/ZTE-AICloud/Co-Sight ，Click on the green 'Code' button,
+- 提高答案准确率
+- 提高轨迹质量
+- 提高执行稳定性
+- 提高复杂问题解决能力
 
-   ```bash
-   # 1. Select HTTP protocol
-   git clone https://github.com/ZTE-AICloud/Co-Sight.git
-   
-   # 2. Select SSH
-   git clone git@github.com:ZTE-AICloud/Co-Sight.git
-   
-   cd Co-Sight
-   ```
+---
 
-   **2. Download the zip file**
-   Visit https://github.com/ZTE-AICloud/Co-Sight ， Click on the green 'Code' button, select 'Download ZIP', download it and unzip it to enter the project directory.
+## 🔧 核心优化
 
-2. **Prepare the environment**：python version >= 3.11
-  
-3. **Install dependencies**：  Run the following command in the project directory to install dependencies:
-```shell
-pip install -r requirements.txt
+### Prompt 工程
+
+新增竞赛专用 System Prompt 与 Task Prompt，引导模型采用：
+
+```text
+问题分析
+→ 任务拆解
+→ 证据收集
+→ 工具计算
+→ 最终回答
 ```
 
-## ⚙️Configuration
+减少模型直接猜测答案的情况。
 
-1. **Copy the template`.env_template`and generated `.env`**（the document has been joined `.gitignore`，securely store private information）：
-2. **edit** `.env` **configure core parameters**：
-	1. Large model configuration: Configure the corresponding large model address, model name, API-KEY, etc., and further (optionally) configure the planning, execution, tools, and multi-modal model;
-	2. Search engine configuration (optional): configure the API-KEY of the relevant search engine;
-		1. Google Search how to apply：https://developers.google.com/custom-search/v1/overview?hl=zh-cn#api_key
-		   ![](assets/Pasted_image_20250916105315.png)	
-		2. Tavily Search how to apply：https://app.tavily.com/home
-		   ![](assets/Pasted_image_20250502115315.png)
-3. **Configure MCP tool**
-```python
-# 在工程根路径下的config/mcp_server_config.json按需配置如下信息,支持配置多个
-[
-  {
-    "skill_name": "MCP技能名称",
-    "skill_type": "local_mcp",
-    "display_name_zh": "MCP工具中文名称",
-    "display_name_en": "MCP工具英文名称",
-    "description_zh": "MCP工具中文描述",
-    "description_en": "MCP工具中文描述",
-    "mcp_server_config": {
-      "command": "python",
-      "args": [
-        "mcp_server.py"
-      ]
-    }
-  }
-]
-```
-		  
-## ▶️ Quick Start
+### 工具超时保护
 
-1. **start the service**：cosight_server/deep_research/main.py
-![](./assets/Pasted_image_20250430225822.png)
-2. **open your browser and visit**
-`http://localhost:7788/cosight/`
-3. **Enter your first task in the input box and experience the power of the intelligent research engine!**
+针对搜索工具、网络请求等容易卡死的问题，增加统一 Timeout 包装器：
 
-![](assets/Pasted_image_20250501020936.png)
+- 超时自动终止
+- 不阻塞主流程
+- 支持重新规划执行路径
 
+### 工具错误优化
 
-## 🐳 Use Docker
+工具异常不再返回大量 Traceback，而是压缩为简洁错误信息。
 
-1. download the docker offline image
-https://github.com/ZTE-AICloud/Co-Sight/releases/download/v0.0.1/co-sight-v001.tar
+优点：
 
-2. start the docker image
-```shell
-# load an offline image
-docker load -i co-sight-v001.tar
-# start the docker container
-docker run -d -p 7788:7788 co-sight
-# copy the configured .env file into the container (the model and search engine will be configured in a Co-Sight interface)
-docker cp .env ac39023b3b3fdc3245ec1cc0293afb6b0a5efd4675ee79535ed6663c3e2a2558:/home/Co-Sight
-# Restart the image to take effect environment variables
-docker restart ac39023b3b3fdc3245ec1cc0293afb6b0a5efd4675ee79535ed6663c3e2a2558
-```
+- 减少 Token 消耗
+- 防止错误污染上下文
+- 提高推理稳定性
 
-3. **open your browser and visit**
-`http://localhost:7788/cosight/`
+### 长上下文保护
 
-## 📣 Resource Requirements
-- **CPU**: 4 cores  
-- **Memory**: 4GB  
-- **Disk**: 1GB  
-  - Dependencies: 400MB  
-  - Project files: 50MB  
-  - Minimum required disk space: 500MB  
-  - Recommended disk space: 1GB
+针对竞赛任务中 Prompt、搜索结果和推理轨迹过长的问题，增加上下文管理策略。
 
-This configuration ensures basic system operation and successful dependency installation for stable performance.
+目标：
 
-## 🤝 Contribution Guidelines
+- 防止 Context Overflow
+- 降低无效信息占用
+- 提升长任务稳定性
 
-PRs and Issues are very welcome! If you have any ideas or suggestions:
+### Final Answer 捕获
 
-- file an issue describe your idea and issue
-  
-- Initiate a PR: Improve documentation, add examples, or refine features.
-  
+新增最终答案提取逻辑，实现：
 
-Together, we make the Co Sight Agent even more powerful.
+- 推理轨迹与最终答案分离
+- 前端正确显示最终结果
+- 避免答案丢失
 
-## 📄 Paper
+---
 
-If you use Co-Sight in your research, please cite our paper:
+## 🛠 Wikipedia 工具集
 
-```bibtex
-@article{zhang2025cosight,
-  title={Co-Sight: Enhancing LLM-Based Agents via Conflict-Aware Meta-Verification and Trustworthy Reasoning with Structured Facts},
-  author={Zhang, Hongwei and Lu, Ji and Jiang, Shiqing and Zhu, Chenxiang and Xie, Li and Zhong, Chen and Chen, Haoran and Zhu, Yurui and Du, Yongsheng and Gao, Yanqin and Huang, Lingjun and Wang, Baoli and Tan, Fang and Zou, Peng},
-  journal={arXiv preprint arXiv:2510.21557},
-  year={2025},
-  url={https://arxiv.org/abs/2510.21557}
-}
+为解决比赛中大量 Wikipedia 相关题目，新增专项工具：
+
+| 工具名称 | 功能 |
+|----------|------|
+| count_wikipedia_edits_in_year | 统计某年编辑次数 |
+| get_wikipedia_revisions | 获取 Revision 历史 |
+| get_wikipedia_revision_before_date | 获取指定时间前版本 |
+| count_references_for_revision | 统计引用数量 |
+| compute_wikipedia_reference_delta | 对比引用增量 |
+| find_wikipedia_revision_by_size_delta | 根据字节变化定位编辑 |
+| extract_section_from_revision | 提取指定章节 |
+| get_wikipedia_revision_content | 内容预览与清洗 |
+
+这些工具能够将依赖模型推理的问题转化为程序计算问题，从而提升准确率。
+
+---
+
+## 💡 经验总结
+
+在复杂问答竞赛中，许多问题本质上属于：
+
+```text
+信息获取
+→ 数据提取
+→ 程序计算
+→ 结果验证
 ```
 
-Paper: https://arxiv.org/abs/2510.21557
+而不是单纯的语言生成问题。
+
+因此，相比不断增强 Prompt，更重要的是：
+
+- 构建可靠工具链
+- 建立证据获取系统
+- 提高执行稳定性
+- 强化结果验证能力
+
+---
+
+## 📌 后续计划
+
+- 搜索结果自动压缩
+- 检索证据排序
+- 自动上下文裁剪
+- 多阶段答案验证
+- 竞赛专用 Planner 优化
+- 轨迹质量评估系统
